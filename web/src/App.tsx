@@ -377,7 +377,7 @@ function AppContent({
         {tab === 'reporting' && <Sessions refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'log' && <OcppLog refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'syslog' && <SystemLog refreshKey={refreshKey} timezone={timezone} />}
-        {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} />}
+        {tab === 'settings' && <Settings chargePoints={status.chargePoints} refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} />}
       </main>
     </div>
   );

@@ -2,10 +2,30 @@ import { useState, useEffect, useRef } from 'react';
 import { PasskeyManager } from './PasskeyManager';
 import { useTranslation, locales } from '../i18n';
 import type { Locale, TranslationKey } from '../i18n';
+import type { ChargePointInfo } from '../types';
 
 interface SettingGroup {
   titleKey: TranslationKey;
   keys: { key: string; labelKey: TranslationKey; type: 'text' | 'number' | 'toggle' | 'select' | 'password'; options?: string[] }[];
+}
+
+// Settings whose underlying OCPP keys are Zappi-specific (PaymentURL,
+// ChargerName-as-LCD-text). On non-Zappi chargers they're either ignored or
+// rejected with an OCPP error, so we hide them once we've confirmed the
+// connected charger isn't a Zappi.
+const ZAPPI_ONLY_SETTING_KEYS = new Set(['zappi.charger_name', 'zappi.qr_url']);
+
+// detectZappi returns true if a charge point with Myenergi/Zappi vendor+model
+// is known, false if a different vendor is known, and null if nothing has
+// booted yet (so we can't tell — show everything by default).
+function detectZappi(chargePoints: ChargePointInfo[]): boolean | null {
+  for (const cp of chargePoints) {
+    if (cp.vendor || cp.model) {
+      return (cp.vendor ?? '').toLowerCase() === 'myenergi' &&
+        (cp.model ?? '').toLowerCase() === 'zappi';
+    }
+  }
+  return null;
 }
 
 const timezones: string[] = (() => {
@@ -101,12 +121,13 @@ const groups: SettingGroup[] = [
   },
 ];
 
-export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void }) {
+export function Settings({ chargePoints, refreshKey, locale, onLocaleChange }: { chargePoints: ChargePointInfo[]; refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void }) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+  const isZappi = detectZappi(chargePoints);
 
   useEffect(() => {
     fetch('/api/settings')
@@ -154,7 +175,14 @@ export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: 
         <legend>{t('passkey.heading')}</legend>
         <PasskeyManager />
       </fieldset>
-      {groups.map((g, gi) => (
+      {groups.map((g, gi) => {
+        // Hide Zappi-only fields once we've confirmed the connected charger
+        // isn't a Zappi. While vendor is unknown (no charger booted yet) we
+        // show everything so a Zappi user pre-boot doesn't lose options.
+        const visibleKeys = isZappi === false
+          ? g.keys.filter(({ key }) => !ZAPPI_ONLY_SETTING_KEYS.has(key))
+          : g.keys;
+        return (
         <div key={gi}>
         <fieldset>
           <legend>{t(g.titleKey)}</legend>
@@ -166,7 +194,7 @@ export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: 
               </select>
             </label>
           )}
-          {g.keys.map(({ key, labelKey, type, options }) => (
+          {visibleKeys.map(({ key, labelKey, type, options }) => (
             <label key={key} className="setting-row">
               <span>{t(labelKey)}</span>
               {type === 'toggle' ? (
@@ -201,10 +229,11 @@ export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: 
           ))}
         </fieldset>
         {g.titleKey === 'settings.charger' && (
-          <MaintenanceSection cpID={getValue('zappi.charge_box_id')} />
+          <MaintenanceSection cpID={getValue('zappi.charge_box_id')} showFirmwareUpdate={isZappi !== false} />
         )}
         </div>
-      ))}
+        );
+      })}
       <div className="settings-actions">
         <button className="btn primary" onClick={handleSave} disabled={saving || !Object.keys(dirty).length}>
           {saving ? t('settings.saving') : t('settings.saveChanges')}
@@ -215,7 +244,7 @@ export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: 
   );
 }
 
-function MaintenanceSection({ cpID }: { cpID: string }) {
+function MaintenanceSection({ cpID, showFirmwareUpdate }: { cpID: string; showFirmwareUpdate: boolean }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
@@ -279,16 +308,18 @@ function MaintenanceSection({ cpID }: { cpID: string }) {
     <fieldset>
       <legend>{t('settings.maintenance')}</legend>
       {disabled && <div className="msg">{t('settings.maintenanceNoCharger')}</div>}
-      <div className="setting-row">
-        <span>{t('settings.updateFirmware')}</span>
-        <button
-          className="btn primary btn-sm"
-          disabled={disabled || busy !== null}
-          onClick={() => post('/update-firmware')}
-        >
-          {busy === '/update-firmware' ? t('settings.maintenanceSending') : t('settings.updateFirmware')}
-        </button>
-      </div>
+      {showFirmwareUpdate && (
+        <div className="setting-row">
+          <span>{t('settings.updateFirmware')}</span>
+          <button
+            className="btn primary btn-sm"
+            disabled={disabled || busy !== null}
+            onClick={() => post('/update-firmware')}
+          >
+            {busy === '/update-firmware' ? t('settings.maintenanceSending') : t('settings.updateFirmware')}
+          </button>
+        </div>
+      )}
       <div className="setting-row">
         <span>{t('settings.clearCache')}</span>
         <button
