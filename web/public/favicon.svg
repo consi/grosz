@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <circle fill="#ECCA43" cx="256" cy="256" r="256"/>
+  <circle fill="#F7E259" cx="256" cy="256" r="251"/>
+  <path fill="#F8D548" d="M503.8 215.7A253 253 0 01507 256c0 138.6-112.4 251-251 251S5 394.6 5 256c0-21.9 2.8-43.1 8.1-63.3l246.4 183.5 244.3-160.5z"/>
+  <circle fill="#D7925B" cx="256" cy="256" r="197"/>
+  <circle fill="#EDA140" cx="256" cy="256" r="192"/>
+  <text x="256" y="232" text-anchor="middle" dominant-baseline="central" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="200" fill="#C26A34" dy="3" dx="3">1</text>
+  <text x="256" y="232" text-anchor="middle" dominant-baseline="central" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="200" fill="#F3DC6B">1</text>
+  <text x="256" y="370" text-anchor="middle" dominant-baseline="central" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="100" fill="#C26A34" dy="2" dx="2">gr</text>
+  <text x="256" y="370" text-anchor="middle" dominant-baseline="central" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="100" fill="#F3DC6B">gr</text>
+</svg>

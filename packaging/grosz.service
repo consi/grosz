@@ -1,0 +1,30 @@
+[Unit]
+Description=Grosz - OCPP Charger Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grosz
+Group=grosz
+ExecStart=/usr/bin/grosz --db /var/lib/grosz/grosz.db
+WorkingDirectory=/var/lib/grosz
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grosz
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/grosz
+PrivateTmp=true
+
+# Environment
+Environment=LOG_FORMAT=json
+Environment=TZ=Europe/Warsaw
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,81 @@
+package web
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/consi/grosz/internal/zappi"
+)
+
+// settingToOCPPKey maps grosz setting keys to Zappi OCPP configuration keys.
+var settingToOCPPKey = map[string]string{
+	"zappi.charger_name":   zappi.KeyChargerName,
+	"zappi.meter_interval": zappi.KeyMeterValueSampleInterval,
+	"zappi.id_tag":         zappi.KeyPlugAndChargeId,
+	"zappi.qr_url":         zappi.KeyPaymentURL,
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	all, err := s.store.All()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Redact sensitive values
+	for k := range sensitiveKeys {
+		if _, ok := all[k]; ok {
+			all[k] = ""
+		}
+	}
+	writeJSON(w, all)
+}
+
+func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
+	var updates map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Hash password before storing
+	if pw, ok := updates["auth.password"]; ok {
+		if pw == "" {
+			// Empty means "no change" (redacted field submitted unchanged)
+			delete(updates, "auth.password")
+		} else {
+			hashed, err := hashPassword(pw)
+			if err != nil {
+				http.Error(w, "failed to hash password", http.StatusInternalServerError)
+				return
+			}
+			updates["auth.password"] = hashed
+		}
+	}
+
+	if err := s.store.SetMany(updates); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Log what changed (redact sensitive values)
+	for k, v := range updates {
+		if sensitiveKeys[k] {
+			v = "****"
+		}
+		s.log.Info("setting updated", "key", k, "value", v)
+	}
+
+	// Push changed settings to connected charger via OCPP ChangeConfiguration
+	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	if cpID != "" {
+		if cp := s.ocpp.ChargePoint(cpID); cp != nil && cp.IsConnected() {
+			for settingKey, value := range updates {
+				if ocppKey, ok := settingToOCPPKey[settingKey]; ok {
+					go zappi.PushConfig(s.ocpp, cpID, ocppKey, value, s.log)
+				}
+			}
+		}
+	}
+
+	writeJSON(w, map[string]any{"ok": true})
+}

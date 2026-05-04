@@ -1,0 +1,43 @@
+# Binaries
+/grosz
+/grosz-linux-*
+*.deb
+*.rpm
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build output
+/dist/
+/web/dist/
+/web/node_modules/
+/internal/web/dist
+/internal/web/node_modules
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage.out
+coverage.html
+
+# Go
+/vendor/
