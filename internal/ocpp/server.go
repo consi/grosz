@@ -125,7 +125,7 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 		s.log.Info("charge point connected", "id", id, "addr", addr)
 		s.fireStatusHook()
 		if s.store != nil {
-			s.store.RecordSystemEvent(store.SystemEvent{
+			_ = s.store.RecordSystemEvent(store.SystemEvent{
 				Timestamp: time.Now(), Source: "ocpp", Action: "chargerConnected",
 				Input: map[string]any{"cpID": id, "remoteAddr": addr},
 			})

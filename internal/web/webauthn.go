@@ -13,8 +13,6 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
-
-	"github.com/consi/grosz/internal/store"
 )
 
 // webauthnUser implements webauthn.User for the single admin user.
@@ -363,15 +361,3 @@ func (s *Server) handleWebAuthnDeleteCredential(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// initWebAuthnCredentialList is a helper for returning credential info during listing.
-func credentialInfoList(creds []store.WebAuthnCredential) []map[string]any {
-	result := make([]map[string]any, len(creds))
-	for i, c := range creds {
-		result[i] = map[string]any{
-			"id":        c.ID,
-			"name":      c.Name,
-			"createdAt": c.CreatedAt.Format(time.RFC3339),
-		}
-	}
-	return result
-}

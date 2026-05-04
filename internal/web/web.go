@@ -152,7 +152,7 @@ func (s *Server) Start(port int) {
 // Stop shuts down the web server.
 func (s *Server) Stop() {
 	s.sse.Close()
-	s.srv.Close()
+	_ = s.srv.Close()
 }
 
 // Broadcast sends an SSE event to all connected clients.
@@ -311,7 +311,7 @@ func (s *Server) handleVehicleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.Write(imgBytes)
+	_, _ = w.Write(imgBytes)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

@@ -186,7 +186,7 @@ func (s *Server) finalizeSessionOnStop(cpID string, connID int, stopTime time.Ti
 	s.log.Info("finalized session on stop status",
 		"txn", cs.TransactionID, "energy", energy, "cost", cost, "stopTime", stopTime,
 	)
-	s.store.RecordSystemEvent(store.SystemEvent{
+	_ = s.store.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "ocpp", Action: "finalizeSessionOnStop", Level: "info",
 		Input:  map[string]any{"txn": cs.TransactionID, "cpID": cpID},
 		Result: map[string]any{"energy": energy, "cost": cost, "stopTime": stopTime.UTC().Format(time.RFC3339)},
@@ -227,7 +227,7 @@ func (s *Server) recordFinalizeWarn(cpID string, txnID int, reason string) {
 	if s.store == nil {
 		return
 	}
-	s.store.RecordSystemEvent(store.SystemEvent{
+	_ = s.store.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "ocpp", Action: "finalizeSessionOnStop", Level: "warn",
 		Input:  map[string]any{"txn": txnID, "cpID": cpID},
 		Result: map[string]any{"skipped": reason},

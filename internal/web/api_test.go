@@ -144,6 +144,6 @@ func TestAPI_ChargerUpdateFirmware_OK(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, got.Location, "location placeholder must be present")
 	require.NotNil(t, got.RetrieveDate)
-	assert.Equal(t, time.UTC, got.RetrieveDate.Time.Location())
+	assert.Equal(t, time.UTC, got.RetrieveDate.Location())
 	assert.Equal(t, http.StatusOK, <-done)
 }

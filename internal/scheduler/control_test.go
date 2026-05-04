@@ -86,7 +86,7 @@ func testStore(t *testing.T) *store.Store {
 	dbPath := filepath.Join(dir, "test.db")
 	s, err := store.New(dbPath, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

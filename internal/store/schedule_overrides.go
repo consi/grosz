@@ -50,7 +50,7 @@ func (s *Store) InsertOverride(o ScheduleOverride) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var existingID int64
 	err = tx.QueryRow(

@@ -128,17 +128,17 @@ func (p *Poller) poll(baseURL string) {
 	resp, err := p.client.Get(baseURL + "/state")
 	if err != nil {
 		p.log.Debug("meter fetch failed", "err", err)
-		p.store.RecordSystemEvent(store.SystemEvent{
+		_ = p.store.RecordSystemEvent(store.SystemEvent{
 			Timestamp: time.Now(), Source: "meter", Action: "poll", Level: "warn",
 			Result: map[string]any{"error": err.Error()},
 		})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		p.log.Debug("meter bad status", "status", resp.StatusCode)
-		p.store.RecordSystemEvent(store.SystemEvent{
+		_ = p.store.RecordSystemEvent(store.SystemEvent{
 			Timestamp: time.Now(), Source: "meter", Action: "poll", Level: "warn",
 			Result: map[string]any{"error": fmt.Sprintf("bad status %d", resp.StatusCode)},
 		})
@@ -237,7 +237,7 @@ func (p *Poller) poll(baseURL string) {
 		sinceLastSyslog := time.Since(p.lastSyslog)
 		p.mu.RUnlock()
 		if sinceLastSyslog >= time.Minute {
-			p.store.RecordSystemEvent(store.SystemEvent{
+			_ = p.store.RecordSystemEvent(store.SystemEvent{
 				Timestamp: time.Now(), Source: "meter", Action: "poll",
 				Result: map[string]any{"powerW": powerW, "energyWh": energyWh},
 			})
@@ -297,7 +297,7 @@ func FetchOnce(meterURL string) (*stateResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var state stateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {

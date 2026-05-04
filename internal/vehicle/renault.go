@@ -148,7 +148,7 @@ func (r *Renault) loop(ctx context.Context) {
 			if len(vinSuffix) > 4 {
 				vinSuffix = vinSuffix[len(vinSuffix)-4:]
 			}
-			r.store.RecordSystemEvent(store.SystemEvent{
+			_ = r.store.RecordSystemEvent(store.SystemEvent{
 				Timestamp: time.Now(), Source: "renault", Action: "poll", Level: "warn",
 				Input:  map[string]any{"vin": vinSuffix},
 				Result: map[string]any{"error": err.Error(), "socReset": true},
@@ -240,7 +240,7 @@ func (r *Renault) poll(user, pass, vin string) error {
 	if len(vinSuffix) > 4 {
 		vinSuffix = vinSuffix[len(vinSuffix)-4:]
 	}
-	r.store.RecordSystemEvent(store.SystemEvent{
+	_ = r.store.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "renault", Action: "poll",
 		Input: map[string]any{"vin": vinSuffix},
 		Result: map[string]any{
@@ -344,7 +344,7 @@ func (r *Renault) gigyaLogin(user, pass string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gigya login: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		SessionInfo struct {
@@ -520,10 +520,10 @@ func (r *Renault) getCockpitStatus(vin string) (*CockpitStatus, error) {
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != 200 {
-			io.ReadAll(io.LimitReader(resp.Body, 256))
+			_, _ = io.ReadAll(io.LimitReader(resp.Body, 256))
 			continue
 		}
 
@@ -660,7 +660,7 @@ func (r *Renault) fetchVehicleDetails(vin string) {
 
 		r.markDetailsFetched(time.Now())
 
-		r.store.RecordSystemEvent(store.SystemEvent{
+		_ = r.store.RecordSystemEvent(store.SystemEvent{
 			Timestamp: time.Now(), Source: "renault", Action: "vehicleDetails",
 			Result: map[string]any{"model": modelName, "hasImage": imageURL != ""},
 		})

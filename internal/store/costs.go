@@ -26,7 +26,7 @@ func (s *Store) AddExternalCost(cost ExternalCost) (int64, error) {
 	}
 	id, _ := result.LastInsertId()
 
-	s.RecordSystemEvent(SystemEvent{
+	_ = s.RecordSystemEvent(SystemEvent{
 		Timestamp: time.Now(), Source: "costs", Action: "add",
 		Input:  map[string]any{"date": cost.Date, "description": cost.Description, "amount": cost.Amount},
 		Result: map[string]any{"id": id},
@@ -46,7 +46,7 @@ func (s *Store) DeleteExternalCost(id int64) error {
 		return sql.ErrNoRows
 	}
 
-	s.RecordSystemEvent(SystemEvent{
+	_ = s.RecordSystemEvent(SystemEvent{
 		Timestamp: time.Now(), Source: "costs", Action: "delete",
 		Input:  map[string]any{"id": id},
 		Result: map[string]any{"deleted": true},
@@ -67,7 +67,7 @@ func (s *Store) ExternalCostsByDateRange(from, to time.Time) ([]ExternalCost, er
 	if err != nil {
 		return nil, fmt.Errorf("query external costs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	costs := make([]ExternalCost, 0)
 	for rows.Next() {

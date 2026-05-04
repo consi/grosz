@@ -22,7 +22,7 @@ func testServer(t *testing.T) *Server {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	st, err := store.New(dbPath, log)
 	require.NoError(t, err)
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 
 	s := NewServer(st, log)
 	// Pre-create the charge point so handlers find it
@@ -740,7 +740,7 @@ func TestNewServer_HydratesFromConnectorState(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	st, err := store.New(dbPath, log)
 	require.NoError(t, err)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	at := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
 	require.NoError(t, st.UpsertConnectorState(store.ConnectorState{
@@ -772,7 +772,7 @@ func TestTransactionIDIncrement(t *testing.T) {
 		require.NoError(t, err)
 		ids[i] = conf.TransactionId
 		// Stop so next start can work
-		s.OnStopTransaction("CP001", &core.StopTransactionRequest{TransactionId: conf.TransactionId, MeterStop: 0, Timestamp: now})
+		_, _ = s.OnStopTransaction("CP001", &core.StopTransactionRequest{TransactionId: conf.TransactionId, MeterStop: 0, Timestamp: now})
 	}
 
 	assert.Equal(t, ids[0]+1, ids[1])

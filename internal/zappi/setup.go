@@ -73,7 +73,7 @@ func Setup(srv *ocpp.Server, cpID string, st *store.Store, log *slog.Logger) err
 	setConfig(KeyMeterValueSampleInterval, interval, "meter sample interval")
 
 	log.Info("Zappi setup complete")
-	st.RecordSystemEvent(store.SystemEvent{
+	_ = st.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "zappi", Action: "setup",
 		Input: map[string]any{"cpID": cpID},
 		Result: map[string]any{"configured": configured, "skipped": skipped},

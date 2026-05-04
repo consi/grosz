@@ -71,7 +71,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		if cp := s.ocpp.ChargePoint(cpID); cp != nil && cp.IsConnected() {
 			for settingKey, value := range updates {
 				if ocppKey, ok := settingToOCPPKey[settingKey]; ok {
-					go zappi.PushConfig(s.ocpp, cpID, ocppKey, value, s.log)
+					go func() { _ = zappi.PushConfig(s.ocpp, cpID, ocppKey, value, s.log) }()
 				}
 			}
 		}

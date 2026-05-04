@@ -111,10 +111,10 @@ func TestRequest_UpdateFirmwareForcesUTC(t *testing.T) {
 	req, err := tcp.WaitUpdateFirmware(2 * time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, req.RetrieveDate)
-	assert.Equal(t, time.UTC, req.RetrieveDate.Time.Location(),
+	assert.Equal(t, time.UTC, req.RetrieveDate.Location(),
 		"retrieveDate must arrive at the charger as UTC")
 	// The instant should be preserved.
-	assert.True(t, req.RetrieveDate.Time.Equal(retrieve.UTC()))
+	assert.True(t, req.RetrieveDate.Equal(retrieve.UTC()))
 	assert.Equal(t, "https://example.com/fw", req.Location)
 	require.NoError(t, <-done)
 }

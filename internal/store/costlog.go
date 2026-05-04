@@ -71,7 +71,7 @@ func (s *Store) CostLogItems(from, to time.Time, limit, offset int) ([]CostLogIt
 	if err != nil {
 		return nil, 0, fmt.Errorf("cost log query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []CostLogItem
 	for rows.Next() {

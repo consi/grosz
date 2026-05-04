@@ -71,7 +71,7 @@ func (s *Store) AllConnectorStates() ([]ConnectorState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query connector_state: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]ConnectorState, 0)
 	for rows.Next() {

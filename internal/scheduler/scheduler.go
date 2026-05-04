@@ -1257,7 +1257,7 @@ func nextDeadline(hhmm string) time.Time {
 	now := time.Now()
 	var h, m int
 	_, _ = time.Parse("15:04", hhmm) // validate format
-	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
+	_, _ = fmt.Sscanf(hhmm, "%d:%d", &h, &m)
 
 	deadline := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
 	if deadline.Before(now) {

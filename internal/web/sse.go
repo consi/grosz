@@ -64,7 +64,7 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprint(w, msg)
+			_, _ = fmt.Fprint(w, msg)
 			flusher.Flush()
 		}
 	}

@@ -635,7 +635,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -677,7 +677,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 		whPerKm = fmt.Sprintf("%.0f", report.WhPerKm)
 	}
 
-	fmt.Fprintf(w, `<div class="grid">
+	_, _ = fmt.Fprintf(w, `<div class="grid">
   <div class="stat"><div class="stat-value">%d</div><div class="stat-label">Sessions</div></div>
   <div class="stat"><div class="stat-value">%.1f</div><div class="stat-label">kWh charged</div></div>
   <div class="stat"><div class="stat-value">%.2f</div><div class="stat-label">PLN charging</div></div>
@@ -698,7 +698,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 
 	// Cost log table
 	if len(logItems) > 0 {
-		fmt.Fprint(w, `<h2>Cost Log</h2>
+		_, _ = fmt.Fprint(w, `<h2>Cost Log</h2>
 <table>
 <tr><th>Date</th><th>Type</th><th>Description</th><th>Energy</th><th>Cost</th></tr>
 `)
@@ -712,10 +712,10 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 			if item.Type == "charging" && item.Distance > 0 {
 				desc += fmt.Sprintf(" (%.0f km, %.1f kWh/100km)", item.Distance, item.KWhPer100km)
 			}
-			fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%s</td><td class=\"num\">%s</td></tr>\n",
+			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%s</td><td class=\"num\">%s</td></tr>\n",
 				item.Date, item.Type, desc, energy, cost)
 		}
-		fmt.Fprint(w, "</table>\n")
+		_, _ = fmt.Fprint(w, "</table>\n")
 	}
 
 	fmt.Fprintf(w, `<div class="footer">Generated %s — grosz EV Charging Manager</div>

@@ -23,7 +23,7 @@ func testStore(t *testing.T) *store.Store {
 	dbPath := filepath.Join(dir, "test.db")
 	s, err := store.New(dbPath, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -74,13 +74,13 @@ func TestGetVehicleDetails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/test-image.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	mux.HandleFunc("/commerce/v1/accounts/test-account/vehicles", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(vehiclesResponse("TESTVIN123", "RENAULT 5", srv.URL+"/test-image.png"))
+		_ = json.NewEncoder(w).Encode(vehiclesResponse("TESTVIN123", "RENAULT 5", srv.URL+"/test-image.png"))
 	})
 
 	st := testStore(t)
@@ -102,7 +102,7 @@ func TestGetVehicleDetails(t *testing.T) {
 func TestGetVehicleDetailsNoImage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/commerce/v1/accounts/test-account/vehicles", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(vehiclesResponse("TESTVIN123", "RENAULT 5", ""))
+		_ = json.NewEncoder(w).Encode(vehiclesResponse("TESTVIN123", "RENAULT 5", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -229,7 +229,7 @@ func TestFetchDetailsRetryAfterFailure(t *testing.T) {
 func TestGetAccountIDPrefersMyRenault(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/commerce/v1/persons/test-person", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"accounts": []any{
 				map[string]any{"accountId": "sfdc-account", "accountType": "SFDC"},
 				map[string]any{"accountId": "myrenault-account", "accountType": "MYRENAULT"},

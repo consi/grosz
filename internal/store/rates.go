@@ -18,7 +18,7 @@ func (s *Store) SaveRates(provider string, rates []Rate) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(
 		`INSERT INTO tariff_rates (provider, start_time, end_time, price)
@@ -28,7 +28,7 @@ func (s *Store) SaveRates(provider string, rates []Rate) error {
 	if err != nil {
 		return fmt.Errorf("prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, r := range rates {
 		if _, err := stmt.Exec(

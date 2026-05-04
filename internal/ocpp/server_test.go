@@ -20,7 +20,7 @@ func newServerWithTempStore(t *testing.T) (*Server, *store.Store) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	st, err := store.New(dbPath, log)
 	require.NoError(t, err)
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	s := NewServer(st, log)
 	return s, st
 }
