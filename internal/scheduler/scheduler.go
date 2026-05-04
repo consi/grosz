@@ -261,7 +261,7 @@ func (s *Scheduler) ClearSchedule() {
 	s.lastProfileHash = ""
 	s.mu.Unlock()
 
-	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	cpID := s.store.ChargeBoxID()
 	clearedProfile := false
 	if cpID != "" && hadProfile {
 		// Only send ClearChargingProfile if no active transaction.
@@ -636,7 +636,7 @@ const profileCmdCooldown = 30 * time.Second
 // controlCharging starts or stops transactions based on the current mode and schedule.
 func (s *Scheduler) controlCharging() {
 	mode := s.store.GetDefault("charger.mode", "schedule")
-	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	cpID := s.store.ChargeBoxID()
 	if cpID == "" {
 		return
 	}
@@ -723,7 +723,7 @@ func (s *Scheduler) sendStart(cpID, mode string) {
 			"sentAgo", time.Since(s.lastStartSent).Round(time.Second))
 		return
 	}
-	idTag := s.store.GetDefault("zappi.id_tag", "grosz")
+	idTag := s.store.ChargerIDTag()
 	s.log.Info("starting charge", "cpID", cpID, "mode", mode)
 	s.lastStartSent = time.Now()
 	err := s.charger.RemoteStartTransaction(cpID, idTag, 1)
@@ -1032,7 +1032,7 @@ func (s *Scheduler) configFromStore() *Config {
 }
 
 func (s *Scheduler) applyProfile(sched *Schedule) {
-	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	cpID := s.store.ChargeBoxID()
 	if cpID == "" {
 		s.log.Debug("no charge_box_id, skipping profile apply")
 		return

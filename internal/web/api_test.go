@@ -40,6 +40,10 @@ func (noopTariff) Name() string                  { return "noop" }
 func (noopTariff) Stop()                         {}
 
 func newAPITestServer(t *testing.T) (*Server, *testutil.TestChargePoint, *ocpp.Server) {
+	return newAPITestServerWithBoot(t, "Myenergi", "Zappi")
+}
+
+func newAPITestServerWithBoot(t *testing.T, vendor, model string) (*Server, *testutil.TestChargePoint, *ocpp.Server) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -61,7 +65,7 @@ func newAPITestServer(t *testing.T) (*Server, *testutil.TestChargePoint, *ocpp.S
 	url := fmt.Sprintf("ws://localhost:%d", port)
 	tcp := testutil.NewTestChargePoint(t, url, "CP_API")
 	time.Sleep(100 * time.Millisecond)
-	_, err = tcp.SendBootNotification("Vendor", "Model")
+	_, err = tcp.SendBootNotification(vendor, model)
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 
@@ -146,4 +150,31 @@ func TestAPI_ChargerUpdateFirmware_OK(t *testing.T) {
 	require.NotNil(t, got.RetrieveDate)
 	assert.Equal(t, time.UTC, got.RetrieveDate.Location())
 	assert.Equal(t, http.StatusOK, <-done)
+}
+
+// Non-Zappi chargers cannot use the placeholder firmware URL — Zappi ignores
+// it and pulls from myenergi servers, but anyone else would actually try to
+// fetch from "myenergi.invalid". Reject up-front rather than emitting a
+// failing request to the wallbox.
+func TestAPI_ChargerUpdateFirmware_RejectsNonZappi(t *testing.T) {
+	web, _, _ := newAPITestServerWithBoot(t, "OtherVendor", "OtherModel")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/charger/CP_API/update-firmware", nil)
+	req.SetPathValue("id", "CP_API")
+	w := httptest.NewRecorder()
+	web.handleChargerUpdateFirmware(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "Zappi")
+}
+
+func TestAPI_ChargerUpdateFirmware_NotFound(t *testing.T) {
+	web, _, _ := newAPITestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/charger/UNKNOWN/update-firmware", nil)
+	req.SetPathValue("id", "UNKNOWN")
+	w := httptest.NewRecorder()
+	web.handleChargerUpdateFirmware(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }

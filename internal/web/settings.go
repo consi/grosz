@@ -66,7 +66,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Push changed settings to connected charger via OCPP ChangeConfiguration
-	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	cpID := s.store.ChargeBoxID()
 	if cpID != "" {
 		if cp := s.ocpp.ChargePoint(cpID); cp != nil && cp.IsConnected() {
 			for settingKey, value := range updates {

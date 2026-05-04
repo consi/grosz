@@ -35,6 +35,10 @@ var defaultSettings = map[string]string{
 	"ocpp.port":                "8887",
 	"ocpp.path":                "/{ws}",
 	"ocpp.auth_key":            "",
+	// Vendor-neutral charger identifiers. Empty by default; the store helpers
+	// fall back to the legacy zappi.* keys when these are unset.
+	"charger.charge_box_id":    "",
+	"charger.id_tag":           "",
 	"zappi.charge_box_id":      "",
 	"zappi.commercial_mode":    "true",
 	"zappi.id_tag":             "grosz",

@@ -14,6 +14,7 @@ import (
 	"github.com/consi/grosz/internal/scheduler"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
+	"github.com/consi/grosz/internal/zappi"
 )
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -330,7 +331,7 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 
 func (s *Server) handleChargerStart(w http.ResponseWriter, r *http.Request) {
 	cpID := r.PathValue("id")
-	idTag := s.store.GetDefault("zappi.id_tag", "grosz")
+	idTag := s.store.ChargerIDTag()
 	if err := s.ocpp.RemoteStartTransaction(cpID, idTag, 1); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -405,6 +406,19 @@ func (s *Server) handleChargerClearCache(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleChargerUpdateFirmware(w http.ResponseWriter, r *http.Request) {
 	cpID := r.PathValue("id")
+	// The placeholder URL only works on Zappi, which ignores location and
+	// pulls from myenergi servers. Other OCPP 1.6 chargers would actually
+	// try to fetch from "myenergi.invalid" and fail. Reject up-front.
+	cp := s.ocpp.ChargePoint(cpID)
+	if cp == nil {
+		http.Error(w, "charge point not found", http.StatusNotFound)
+		return
+	}
+	snap := cp.Snapshot()
+	if snap.BootInfo == nil || !zappi.IsZappi(snap.BootInfo.Vendor, snap.BootInfo.Model) {
+		http.Error(w, "firmware update is only supported on MyEnergi Zappi chargers", http.StatusBadRequest)
+		return
+	}
 	// Zappi ignores the URL and uses myenergi's own firmware servers; we
 	// still must send a syntactically-valid URI to satisfy OCPP 1.6 schema
 	// validation. retrieveDate must be UTC per Zappi.
