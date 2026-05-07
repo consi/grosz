@@ -130,7 +130,7 @@ const cs: Translations = {
   'report.plnTotal': 'PLN celkem',
   'report.kmDriven': 'km ujeto',
   'report.plnPer100km': 'PLN/100km',
-  'report.whPerKm': 'Wh/km',
+  'report.kwhPer100km': 'kWh/100km',
 
   'cost.heading': 'P\u0159idat extern\u00ed n\u00e1klad',
   'cost.date': 'Datum',

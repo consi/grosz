@@ -184,6 +184,69 @@ func (s *Store) PurgeChartMarkers(maxAge time.Duration) error {
 	return err
 }
 
+// MeterDeltaKWh returns energy consumed in [start, end), measured as the
+// max-min of the cumulative energy_wh column. Returns 0 when fewer than
+// two readings cover the window — the caller cannot tell consumption from
+// no-data without that distinction, but for idle accounting "no rows" and
+// "no consumption" both yield 0.
+func (s *Store) MeterDeltaKWh(start, end time.Time) (float64, error) {
+	var lo, hi float64
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(MIN(energy_wh), 0), COALESCE(MAX(energy_wh), 0)
+		 FROM meter_readings
+		 WHERE timestamp >= ? AND timestamp < ?`,
+		start.UTC().Format(time.RFC3339),
+		end.UTC().Format(time.RFC3339),
+	).Scan(&n, &lo, &hi)
+	if err != nil {
+		return 0, fmt.Errorf("meter delta query: %w", err)
+	}
+	if n < 2 {
+		return 0, nil
+	}
+	delta := hi - lo
+	if delta < 0 {
+		delta = 0
+	}
+	return delta / 1000.0, nil
+}
+
+// MeterReadingsCount returns the number of meter rows in [start, end). Used to
+// distinguish "we have data and it shows zero" from "no data exists for this
+// range" — the daily snapshot keeps the existing row in the latter case.
+func (s *Store) MeterReadingsCount(start, end time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM meter_readings
+		 WHERE timestamp >= ? AND timestamp < ?`,
+		start.UTC().Format(time.RFC3339),
+		end.UTC().Format(time.RFC3339),
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("meter readings count: %w", err)
+	}
+	return n, nil
+}
+
+// earliestMeterTimestamp returns the timestamp of the oldest meter reading
+// still in the table. ok=false when no rows exist. Used by reports to know
+// where the live-meter regime ends and the daily_idle fallback begins.
+func (s *Store) earliestMeterTimestamp() (time.Time, bool) {
+	var ts string
+	err := s.db.QueryRow(
+		`SELECT timestamp FROM meter_readings ORDER BY id ASC LIMIT 1`,
+	).Scan(&ts)
+	if err != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 // LatestMeterReading returns the most recent reading.
 func (s *Store) LatestMeterReading() (*MeterReading, error) {
 	var r MeterReading

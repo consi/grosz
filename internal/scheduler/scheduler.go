@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -60,8 +61,8 @@ func (a *ServerCharger) SetChargingProfile(cpID string, connID int, p *types.Cha
 type SchedulePeriod struct {
 	Start  time.Time `json:"start"`
 	End    time.Time `json:"end"`
-	Power  float64   `json:"power"` // W, 0 = don't charge
-	Price  float64   `json:"price"` // PLN/kWh (volume-weighted average for sub-hour periods)
+	Power  float64   `json:"power"`            // W, 0 = don't charge
+	Price  float64   `json:"price"`            // PLN/kWh (volume-weighted average for sub-hour periods)
 	Source string    `json:"source,omitempty"` // "auto" (omitted) or "user_force"
 }
 
@@ -127,10 +128,10 @@ type Scheduler struct {
 	store   *store.Store
 	log     *slog.Logger
 
-	mu         sync.RWMutex
-	current    *Schedule
-	config     *Config
-	livePower  float64 // W, 0 = use MaxPower
+	mu            sync.RWMutex
+	current       *Schedule
+	config        *Config
+	livePower     float64           // W, 0 = use MaxPower
 	skipReason    string            // if non-empty, schedule was skipped
 	skipReasonKey string            // i18n key for skip reason
 	skipParams    map[string]string // parameters for the skip reason template
@@ -173,7 +174,14 @@ func (s *Scheduler) fireOnRecompute() {
 	}
 }
 
-// New creates a Scheduler and starts its background loop.
+// persistedScheduleKey is the settings key holding the JSON-encoded
+// active schedule. Persisted across restarts so the original schedule
+// survives a power loss / server crash and the system doesn't re-pick
+// "current hour" simply because windowStart=now puts it in range.
+const persistedScheduleKey = "scheduler.persisted_schedule"
+
+// New creates a Scheduler, restores any persisted schedule, and starts
+// its background loop.
 func New(charger Charger, tp tariff.Provider, st *store.Store, log *slog.Logger) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
@@ -184,8 +192,118 @@ func New(charger Charger, tp tariff.Provider, st *store.Store, log *slog.Logger)
 		notifyCh: make(chan struct{}, 1),
 		cancel:   cancel,
 	}
+	s.loadPersistedSchedule()
 	go s.loop(ctx)
 	return s
+}
+
+// loadPersistedSchedule restores s.current from the settings store, pruning
+// any slots whose every period ends before now. If the persisted blob is
+// missing or empty, leaves s.current as nil (loop() will trigger a normal
+// recompute on the first tick).
+func (s *Scheduler) loadPersistedSchedule() {
+	raw := s.store.GetDefault(persistedScheduleKey, "")
+	if raw == "" {
+		return
+	}
+
+	var sched Schedule
+	if err := json.Unmarshal([]byte(raw), &sched); err != nil {
+		s.log.Warn("failed to decode persisted schedule, ignoring", "err", err)
+		_ = s.store.RecordSystemEvent(store.SystemEvent{
+			Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule", Level: "warn",
+			Result: map[string]any{"error": err.Error()},
+		})
+		return
+	}
+
+	now := timeNow()
+	dropped := 0
+	keep := sched.Slots[:0]
+	for _, slot := range sched.Slots {
+		// Keep only slots that have at least one period ending in the future.
+		live := false
+		for _, p := range slot.Periods {
+			if p.End.After(now) {
+				live = true
+				break
+			}
+		}
+		if live {
+			keep = append(keep, slot)
+		} else {
+			dropped++
+		}
+	}
+	sched.Slots = keep
+
+	if len(sched.Slots) == 0 {
+		s.log.Info("persisted schedule had no live slots, starting fresh", "droppedPastSlots", dropped)
+		_ = s.store.RecordSystemEvent(store.SystemEvent{
+			Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule",
+			Result: map[string]any{"restored": false, "droppedPastSlots": dropped},
+		})
+		return
+	}
+
+	s.mu.Lock()
+	s.current = &sched
+	s.mu.Unlock()
+
+	activePeriods := 0
+	for _, slot := range sched.Slots {
+		if !slot.Cancelled {
+			activePeriods += len(slot.Periods)
+		}
+	}
+	s.log.Info("persisted schedule restored",
+		"slots", len(sched.Slots),
+		"activePeriods", activePeriods,
+		"droppedPastSlots", dropped,
+	)
+	_ = s.store.RecordSystemEvent(store.SystemEvent{
+		Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule",
+		Result: map[string]any{
+			"restored":         true,
+			"slots":            len(sched.Slots),
+			"activePeriods":    activePeriods,
+			"droppedPastSlots": dropped,
+		},
+	})
+}
+
+// saveCurrent persists s.current (or empty string if nil) to the settings
+// store. Called after every recompute and after every user mutation that
+// changes the schedule. Caller must NOT hold s.mu — this method takes its
+// own RLock.
+func (s *Scheduler) saveCurrent() {
+	s.mu.RLock()
+	cur := s.current
+	s.mu.RUnlock()
+
+	if cur == nil {
+		if err := s.store.Set(persistedScheduleKey, ""); err != nil {
+			s.log.Warn("failed to clear persisted schedule", "err", err)
+		}
+		return
+	}
+
+	data, err := json.Marshal(cur)
+	if err != nil {
+		s.log.Warn("failed to encode schedule for persistence", "err", err)
+		_ = s.store.RecordSystemEvent(store.SystemEvent{
+			Timestamp: time.Now(), Source: "scheduler", Action: "saveSchedule", Level: "warn",
+			Result: map[string]any{"error": err.Error()},
+		})
+		return
+	}
+	if err := s.store.Set(persistedScheduleKey, string(data)); err != nil {
+		s.log.Warn("failed to persist schedule", "err", err)
+		_ = s.store.RecordSystemEvent(store.SystemEvent{
+			Timestamp: time.Now(), Source: "scheduler", Action: "saveSchedule", Level: "warn",
+			Result: map[string]any{"error": err.Error()},
+		})
+	}
 }
 
 // Stop shuts down the scheduler.
@@ -254,6 +372,22 @@ func (s *Scheduler) SetConfig(cfg Config) {
 	s.recompute()
 }
 
+// ReloadConfig drops the cached Config so the next recompute reads fresh
+// values from the store, then triggers an immediate recompute. Call this
+// whenever scheduler-relevant settings change.
+func (s *Scheduler) ReloadConfig() {
+	s.mu.Lock()
+	s.config = nil
+	s.mu.Unlock()
+	_ = s.store.RecordSystemEvent(store.SystemEvent{
+		Timestamp: time.Now(),
+		Source:    "scheduler",
+		Action:    "reloadConfig",
+		Result:    map[string]any{"invalidated": true},
+	})
+	s.NotifyImmediate()
+}
+
 // ClearSchedule removes the current schedule and clears the charging profile.
 func (s *Scheduler) ClearSchedule() {
 	s.mu.Lock()
@@ -285,6 +419,7 @@ func (s *Scheduler) ClearSchedule() {
 		Input:     map[string]any{"cpID": cpID},
 		Result:    map[string]any{"cleared": true, "clearedProfile": clearedProfile},
 	})
+	s.saveCurrent()
 }
 
 // CancelSlot cancels a specific day's slot by date string (YYYY-MM-DD).
@@ -315,6 +450,7 @@ func (s *Scheduler) CancelSlot(date string) bool {
 		Result:    map[string]any{"found": found},
 	})
 	if found {
+		s.saveCurrent()
 		// If we were charging in this slot's period, stop
 		s.controlCharging()
 	}
@@ -349,6 +485,7 @@ func (s *Scheduler) RestoreSlot(date string) bool {
 		Result:    map[string]any{"found": found},
 	})
 	if found {
+		s.saveCurrent()
 		// If we're now in this slot's period, start charging
 		s.controlCharging()
 	}
@@ -425,6 +562,7 @@ func (s *Scheduler) preserveActiveSlot(slot *ScheduleSlot, wouldSkipKey string, 
 	// Re-applying the same profile is a no-op via hash dedup but keeps the
 	// charger's profile state consistent if the previous apply was lost.
 	s.applyProfile(preserved)
+	s.saveCurrent()
 	s.fireOnRecompute()
 }
 
@@ -499,15 +637,18 @@ func (s *Scheduler) detectMissedPeriods(prev *Schedule) {
 // mergeActiveSlotPreservingActive merges the in-progress slot from the
 // previous schedule into the recomputed sched, replacing sched's same-date
 // slot. The active period (the one whose [Start, End) contains now and has
-// Power > 0) keeps its Start, but its End may grow to absorb adjacent
-// recomputed periods that match its power — extending the running session
-// continuously without an OCPP zero-power gap. Non-adjacent recomputed
-// periods after the active period are appended verbatim. Other periods of
-// the in-progress slot are kept as-is.
+// Power > 0) is preserved verbatim — never shortened, extended, split, or
+// shifted, so an ongoing OCPP transaction keeps its scheduled bounds.
 //
-// The active period never shrinks, splits, or shifts: recompute can never
-// disrupt an ongoing transaction. If the in-progress slot has no period
-// containing now (race at the boundary), falls back to a strict pin.
+// Periods in the previous slot that fall after the active period are
+// dropped: recompute owns the post-active future. Recomputed periods whose
+// Start is at or after active.End are appended (after dropping any that
+// overlap the active period). Hour-level periods are kept separate at the
+// data layer; consolidation into continuous OCPP blocks happens in
+// BuildProfile so the user can still adjust each hourly slot independently.
+//
+// If the in-progress slot has no period containing now (race at the boundary),
+// falls back to a strict pin via mergeInProgressSlot.
 func mergeActiveSlotPreservingActive(sched *Schedule, in ScheduleSlot) *Schedule {
 	now := timeNow()
 	activeIdx := -1
@@ -532,59 +673,32 @@ func mergeActiveSlotPreservingActive(sched *Schedule, in ScheduleSlot) *Schedule
 	}
 
 	merged := cloneSlot(in)
-	active := &merged.Periods[activeIdx]
+	// Drop everything after the active period — recompute owns post-active future.
+	merged.Periods = merged.Periods[:activeIdx+1]
+	active := merged.Periods[activeIdx]
 
 	if recomputed != nil {
-		var candidates []SchedulePeriod
 		for _, p := range recomputed.Periods {
-			if !p.Start.Before(active.End) {
-				candidates = append(candidates, p)
-			}
-		}
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Start.Before(candidates[j].Start)
-		})
-
-		activeHrs := active.End.Sub(active.Start).Hours()
-		baseE := active.Power / 1000 * activeHrs
-		baseC := active.Price * baseE
-		addE, addC := 0.0, 0.0
-		var extras []SchedulePeriod
-		cursor := active.End
-		for _, c := range candidates {
-			if c.Start.Equal(cursor) && c.Power == active.Power {
-				hrs := c.End.Sub(c.Start).Hours()
-				e := c.Power / 1000 * hrs
-				addE += e
-				addC += c.Price * e
-				cursor = c.End
+			// Skip periods that overlap the active period — active owns its time range.
+			if p.Start.Before(active.End) {
 				continue
 			}
-			extras = append(extras, c)
+			merged.Periods = append(merged.Periods, p)
 		}
-		if addE > 0 {
-			active.End = cursor
-			if total := baseE + addE; total > 0 {
-				active.Price = (baseC + addC) / total
-			}
-		}
-		if len(extras) > 0 {
-			merged.Periods = append(merged.Periods, extras...)
-			sort.Slice(merged.Periods, func(i, j int) bool {
-				return merged.Periods[i].Start.Before(merged.Periods[j].Start)
-			})
-		}
-
-		var totC, totE float64
-		for _, p := range merged.Periods {
-			hrs := p.End.Sub(p.Start).Hours()
-			e := p.Power / 1000 * hrs
-			totE += e
-			totC += p.Price * e
-		}
-		merged.Cost = math.Round(totC*100) / 100
-		merged.Energy = math.Round(totE*100) / 100
+		sort.Slice(merged.Periods, func(i, j int) bool {
+			return merged.Periods[i].Start.Before(merged.Periods[j].Start)
+		})
 	}
+
+	var totC, totE float64
+	for _, p := range merged.Periods {
+		hrs := p.End.Sub(p.Start).Hours()
+		e := p.Power / 1000 * hrs
+		totE += e
+		totC += p.Price * e
+	}
+	merged.Cost = math.Round(totC*100) / 100
+	merged.Energy = math.Round(totE*100) / 100
 
 	return mergeInProgressSlot(sched, merged)
 }
@@ -663,6 +777,34 @@ func (s *Scheduler) NotifyImmediate() {
 	}
 }
 
+// OnModeChanged is the synchronous user-driven mode-change entry point.
+// Compared to a plain Notify():
+//   - clears the start/stop cooldowns so a user click is never silently
+//     swallowed by a stuck cloud-proxy timestamp from a prior attempt
+//   - runs controlCharging synchronously (no 5s debounce, no 30s tick wait)
+//     against the explicit new mode (so a rapid double-toggle doesn't race
+//     the store)
+//   - bypasses the SuspendedEV early-return: when the user explicitly forces
+//     charging, we attempt the RemoteStartTransaction even though Zappi may
+//     ignore it — the user's intent is honored and recorded in events
+//   - schedules a follow-up recompute via NotifyImmediate so the schedule
+//     view reflects the new mode (e.g., Off→Schedule needs to recompute)
+func (s *Scheduler) OnModeChanged(oldMode, newMode string) {
+	s.mu.Lock()
+	s.lastStartSent = time.Time{}
+	s.lastStopSent = time.Time{}
+	s.mu.Unlock()
+
+	_ = s.store.RecordSystemEvent(store.SystemEvent{
+		Timestamp: time.Now(), Source: "scheduler", Action: "modeChange",
+		Input:  map[string]any{"old": oldMode, "new": newMode},
+		Result: map[string]any{"clearedCooldowns": true},
+	})
+
+	s.controlChargingInternal(newMode, true)
+	s.NotifyImmediate()
+}
+
 // UpdateLivePower updates the actual power draw from MeterValues.
 func (s *Scheduler) UpdateLivePower(powerW float64) {
 	s.mu.Lock()
@@ -711,8 +853,16 @@ func (s *Scheduler) loop(ctx context.Context) {
 			s.store.GetBool("scheduler.enabled", true)
 	}
 
-	// Initial recompute on startup
-	if isScheduleMode() {
+	// Initial recompute on startup — but only when no schedule was restored
+	// from persistence. Skipping the initial recompute is the whole point of
+	// persistence: the pre-crash schedule survives, and we don't accidentally
+	// re-pick "current hour" just because windowStart=now puts it in range.
+	// The regular 15-min ticker still drives recomputes, so live tariff
+	// changes still take effect — just not as a knee-jerk on boot.
+	s.mu.RLock()
+	hasRestored := s.current != nil
+	s.mu.RUnlock()
+	if isScheduleMode() && !hasRestored {
 		s.recompute()
 	}
 
@@ -802,6 +952,17 @@ const profileCmdCooldown = 30 * time.Second
 // controlCharging starts or stops transactions based on the current mode and schedule.
 func (s *Scheduler) controlCharging() {
 	mode := s.store.GetDefault("charger.mode", "schedule")
+	s.controlChargingInternal(mode, false)
+}
+
+// controlChargingInternal is the workhorse of controlCharging, with two
+// extras to support explicit user-driven mode switches via OnModeChanged:
+//   - modeOverride: lets the caller pin the mode for this invocation rather
+//     than re-reading the store mid-flight (a rapid double-toggle race).
+//   - forced: bypasses the SuspendedEV early-return so an explicit user
+//     click on Force still attempts a RemoteStartTransaction (Zappi may
+//     ignore it, but the user's intent is honored and recorded).
+func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 	cpID := s.store.GetDefault("zappi.charge_box_id", "")
 	if cpID == "" {
 		return
@@ -829,10 +990,14 @@ func (s *Scheduler) controlCharging() {
 	// RemoteStopTransaction — Zappi ignores it in this state — and don't start
 	// a new transaction; the connector still reports the open OCPP transaction
 	// until unplug. Logged at Debug to avoid filling the journal every 30s.
-	if status == "SuspendedEV" {
+	// User-forced mode changes bypass this gate so an explicit click still
+	// gets a RemoteStartTransaction attempt.
+	if status == "SuspendedEV" && !forced {
 		s.log.Debug("car suspended charging, waiting for unplug", "cpID", cpID, "txnID", txnID, "mode", mode)
 		return
 	}
+
+	suspendedEVOverride := status == "SuspendedEV" && forced
 
 	switch mode {
 	case "off":
@@ -852,7 +1017,7 @@ func (s *Scheduler) controlCharging() {
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "force", cpID)
-			s.sendStart(cpID, "force")
+			s.sendStartForced(cpID, "force", suspendedEVOverride)
 		}
 	default: // "schedule"
 		if !pluggedIn {
@@ -876,7 +1041,7 @@ func (s *Scheduler) controlCharging() {
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "schedule", cpID)
-			s.sendStart(cpID, "schedule")
+			s.sendStartForced(cpID, "schedule", suspendedEVOverride)
 		} else if !shouldCharge && hasTransaction {
 			s.sendStop(cpID, txnID, "schedule")
 		}
@@ -884,13 +1049,17 @@ func (s *Scheduler) controlCharging() {
 }
 
 func (s *Scheduler) sendStart(cpID, mode string) {
+	s.sendStartForced(cpID, mode, false)
+}
+
+func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool) {
 	if !s.lastStartSent.IsZero() && time.Since(s.lastStartSent) < remoteCmdCooldown {
 		s.log.Debug("remote start already sent, waiting for cloud proxy",
 			"sentAgo", time.Since(s.lastStartSent).Round(time.Second))
 		return
 	}
 	idTag := s.store.GetDefault("zappi.id_tag", "grosz")
-	s.log.Info("starting charge", "cpID", cpID, "mode", mode)
+	s.log.Info("starting charge", "cpID", cpID, "mode", mode, "suspendedEVOverride", suspendedEVOverride)
 	s.lastStartSent = time.Now()
 	err := s.charger.RemoteStartTransaction(cpID, idTag, 1)
 	if err != nil {
@@ -898,11 +1067,15 @@ func (s *Scheduler) sendStart(cpID, mode string) {
 	} else {
 		_ = s.store.InsertChartMarker("start", time.Now())
 	}
+	result := resultFromErr(err, "start")
+	if suspendedEVOverride {
+		result["suspendedEVOverride"] = true
+	}
 	_ = s.store.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging",
-		Level: levelFromErr(err),
+		Level:  levelFromErr(err),
 		Input:  map[string]any{"mode": mode, "cpID": cpID},
-		Result: resultFromErr(err, "start"),
+		Result: result,
 	})
 }
 
@@ -923,7 +1096,7 @@ func (s *Scheduler) sendStop(cpID string, txnID int, mode string) {
 	// (and we don't double-mark when the EV stops on its own).
 	_ = s.store.RecordSystemEvent(store.SystemEvent{
 		Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging",
-		Level: levelFromErr(err),
+		Level:  levelFromErr(err),
 		Input:  map[string]any{"mode": mode, "cpID": cpID, "txnID": txnID},
 		Result: resultFromErr(err, "stop"),
 	})
@@ -1078,6 +1251,7 @@ func (s *Scheduler) recompute() {
 			Input:  map[string]any{"targetEnergy": fresh.TargetEnergy, "maxPrice": cfg.MaxPrice, "ratesCount": len(rates), "currentSoC": cfg.CurrentSoC, "forces": len(forcePeriods)},
 			Result: map[string]any{"skipped": true, "reason": skipReason},
 		})
+		s.saveCurrent()
 		s.fireOnRecompute()
 		return
 	}
@@ -1162,6 +1336,7 @@ func (s *Scheduler) recompute() {
 	})
 
 	s.applyProfile(sched)
+	s.saveCurrent()
 	s.fireOnRecompute()
 }
 

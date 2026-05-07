@@ -1,7 +1,9 @@
 package scheduler
 
 import (
+	"log/slog"
 	"math"
+	"os"
 	"testing"
 	"time"
 
@@ -342,9 +344,11 @@ func mockNow(t *testing.T, at time.Time) {
 	t.Cleanup(func() { timeNow = orig })
 }
 
-// Mid-session, the next adjacent recomputed hour should extend the active
-// period's End so the running OCPP transaction continues seamlessly.
-func TestMergeActiveSlotExtendsAdjacent(t *testing.T) {
+// Mid-session, the next adjacent recomputed hour is appended as a separate
+// hourly period — the active period's bounds are never extended. OCPP-level
+// consolidation (BuildProfile) is what makes adjacent same-power periods
+// charge as one continuous block.
+func TestMergeActiveSlotKeepsHourlyAdjacent(t *testing.T) {
 	day := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)
 	now := day.Add(2*time.Hour + 30*time.Minute) // 02:30, mid-active-period
 	mockNow(t, now)
@@ -360,8 +364,7 @@ func TestMergeActiveSlotExtendsAdjacent(t *testing.T) {
 		Periods:  []SchedulePeriod{active},
 	}
 
-	// Recomputed today picks 03:00–04:00 (adjacent to active.End=03:00) at
-	// the same power — should merge into the active period.
+	// Recomputed today picks 03:00–04:00 (adjacent to active.End=03:00).
 	recomputed := &Schedule{
 		Slots: []ScheduleSlot{
 			{
@@ -377,14 +380,18 @@ func TestMergeActiveSlotExtendsAdjacent(t *testing.T) {
 	merged := mergeActiveSlotPreservingActive(recomputed, cloneSlot(inProgress))
 	require.NotNil(t, merged)
 	require.Len(t, merged.Slots, 1)
-	require.Len(t, merged.Slots[0].Periods, 1, "adjacent period should be merged into active, not appended")
+	require.Len(t, merged.Slots[0].Periods, 2, "hourly periods stay separate")
 
-	p := merged.Slots[0].Periods[0]
-	assert.Equal(t, active.Start, p.Start, "active Start unchanged")
-	assert.Equal(t, day.Add(4*time.Hour), p.End, "active End extended through adjacent hour")
-	assert.Equal(t, float64(11000), p.Power)
-	// Volume-weighted price: (0.30*11 + 0.40*11) / 22 = 0.35
-	assert.InDelta(t, 0.35, p.Price, 0.001)
+	a := merged.Slots[0].Periods[0]
+	assert.Equal(t, active.Start, a.Start, "active Start unchanged")
+	assert.Equal(t, active.End, a.End, "active End unchanged (no extension)")
+	assert.Equal(t, float64(11000), a.Power)
+	assert.InDelta(t, 0.30, a.Price, 0.001, "active price unchanged")
+
+	b := merged.Slots[0].Periods[1]
+	assert.Equal(t, day.Add(3*time.Hour), b.Start)
+	assert.Equal(t, day.Add(4*time.Hour), b.End)
+	assert.InDelta(t, 0.40, b.Price, 0.001, "appended period keeps its own price")
 }
 
 // Mid-session with no adjacent recomputed hour — non-adjacent later periods
@@ -469,6 +476,7 @@ func TestMergeActiveSlotEmptyRecomputeToday(t *testing.T) {
 
 // When the recomputed period overlaps the active period (would-be conflict),
 // it must be filtered out — the active period owns its time range exclusively.
+// Adjacent recomputed periods are appended as separate hourly periods.
 func TestMergeActiveSlotIgnoresOverlappingRecomputedPeriods(t *testing.T) {
 	day := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)
 	now := day.Add(2*time.Hour + 30*time.Minute)
@@ -502,10 +510,98 @@ func TestMergeActiveSlotIgnoresOverlappingRecomputedPeriods(t *testing.T) {
 	merged := mergeActiveSlotPreservingActive(recomputed, cloneSlot(inProgress))
 	require.NotNil(t, merged)
 	require.Len(t, merged.Slots, 1)
-	require.Len(t, merged.Slots[0].Periods, 1, "overlapping period dropped, adjacent merged")
-	p := merged.Slots[0].Periods[0]
-	assert.Equal(t, active.Start, p.Start)
-	assert.Equal(t, day.Add(5*time.Hour), p.End, "extended through adjacent 04:00-05:00")
+	require.Len(t, merged.Slots[0].Periods, 2, "overlapping dropped; adjacent appended as separate period")
+	a := merged.Slots[0].Periods[0]
+	assert.Equal(t, active.Start, a.Start)
+	assert.Equal(t, active.End, a.End, "active End unchanged")
+	b := merged.Slots[0].Periods[1]
+	assert.Equal(t, day.Add(4*time.Hour), b.Start)
+	assert.Equal(t, day.Add(5*time.Hour), b.End)
+	assert.InDelta(t, 0.40, b.Price, 0.001)
+}
+
+// The user's reported orphan scenario: a previous recompute extended the
+// active period into adjacent hours, leaving in.Periods with both the
+// extended period AND the original hourly period of the absorbed hour.
+// The new hourly model should produce two clean hourly periods, no orphan.
+func TestMergeActiveSlotNoOrphanWhenInHasMultipleHours(t *testing.T) {
+	day := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)
+	now := day.Add(14*time.Hour + 30*time.Minute) // 14:30
+	mockNow(t, now)
+
+	inProgress := ScheduleSlot{
+		Date:     "2026-05-06",
+		Deadline: day.Add(31 * time.Hour),
+		Periods: []SchedulePeriod{
+			{Start: day.Add(14 * time.Hour), End: day.Add(15 * time.Hour), Power: 11000, Price: 0.30},
+			{Start: day.Add(15 * time.Hour), End: day.Add(16 * time.Hour), Power: 11000, Price: 0.40},
+		},
+	}
+
+	recomputed := &Schedule{
+		Slots: []ScheduleSlot{
+			{
+				Date:     "2026-05-06",
+				Deadline: day.Add(31 * time.Hour),
+				Periods: []SchedulePeriod{
+					{Start: day.Add(14 * time.Hour), End: day.Add(15 * time.Hour), Power: 11000, Price: 0.30},
+					{Start: day.Add(15 * time.Hour), End: day.Add(16 * time.Hour), Power: 11000, Price: 0.40},
+				},
+			},
+		},
+	}
+
+	merged := mergeActiveSlotPreservingActive(recomputed, cloneSlot(inProgress))
+	require.NotNil(t, merged)
+	require.Len(t, merged.Slots, 1)
+	require.Len(t, merged.Slots[0].Periods, 2, "no orphan: hourly periods stay separate")
+	assert.Equal(t, day.Add(14*time.Hour), merged.Slots[0].Periods[0].Start)
+	assert.Equal(t, day.Add(15*time.Hour), merged.Slots[0].Periods[0].End)
+	assert.Equal(t, day.Add(15*time.Hour), merged.Slots[0].Periods[1].Start)
+	assert.Equal(t, day.Add(16*time.Hour), merged.Slots[0].Periods[1].End)
+	// Energy: 2 hours × 11 kW = 22 kWh (not 33 — that was the orphan double-count bug).
+	assert.InDelta(t, 22.0, merged.Slots[0].Energy, 0.01)
+}
+
+// A previous schedule had post-active hours that the latest recompute no
+// longer picks. Those stale post-active hours are dropped — recompute owns
+// the post-active future.
+func TestMergeActiveSlotDropsStalePostActive(t *testing.T) {
+	day := time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC)
+	now := day.Add(14*time.Hour + 30*time.Minute) // 14:30
+	mockNow(t, now)
+
+	inProgress := ScheduleSlot{
+		Date:     "2026-05-06",
+		Deadline: day.Add(31 * time.Hour),
+		Periods: []SchedulePeriod{
+			{Start: day.Add(14 * time.Hour), End: day.Add(15 * time.Hour), Power: 11000, Price: 0.30},
+			{Start: day.Add(15 * time.Hour), End: day.Add(16 * time.Hour), Power: 11000, Price: 0.40},
+			{Start: day.Add(16 * time.Hour), End: day.Add(17 * time.Hour), Power: 11000, Price: 0.50},
+		},
+	}
+
+	// Recompute now only picks 15-16; 16-17 should be dropped from the result.
+	recomputed := &Schedule{
+		Slots: []ScheduleSlot{
+			{
+				Date:     "2026-05-06",
+				Deadline: day.Add(31 * time.Hour),
+				Periods: []SchedulePeriod{
+					{Start: day.Add(15 * time.Hour), End: day.Add(16 * time.Hour), Power: 11000, Price: 0.40},
+				},
+			},
+		},
+	}
+
+	merged := mergeActiveSlotPreservingActive(recomputed, cloneSlot(inProgress))
+	require.NotNil(t, merged)
+	require.Len(t, merged.Slots, 1)
+	require.Len(t, merged.Slots[0].Periods, 2, "stale 16-17 dropped; recompute owns post-active future")
+	assert.Equal(t, day.Add(14*time.Hour), merged.Slots[0].Periods[0].Start)
+	assert.Equal(t, day.Add(15*time.Hour), merged.Slots[0].Periods[0].End)
+	assert.Equal(t, day.Add(15*time.Hour), merged.Slots[0].Periods[1].Start)
+	assert.Equal(t, day.Add(16*time.Hour), merged.Slots[0].Periods[1].End)
 }
 
 func TestNextDeadline(t *testing.T) {
@@ -513,4 +609,178 @@ func TestNextDeadline(t *testing.T) {
 	assert.Equal(t, 7, d.Hour())
 	assert.Equal(t, 0, d.Minute())
 	assert.True(t, d.After(time.Now()) || d.Equal(time.Now()))
+}
+
+// --- persistence ---
+
+// saveCurrent encodes s.current to settings; loadPersistedSchedule restores
+// it. After a "restart" (new Scheduler against the same store) the schedule
+// must come back intact.
+func TestPersistedScheduleSurvivesRestart(t *testing.T) {
+	mock := &mockCharger{}
+	s, st := newTestScheduler(t, mock)
+
+	now := time.Now().Truncate(time.Hour)
+	original := &Schedule{
+		Slots: []ScheduleSlot{{
+			Date:     now.Format("2006-01-02"),
+			Deadline: now.Add(8 * time.Hour),
+			Periods: []SchedulePeriod{
+				{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000, Price: 0.30},
+				{Start: now.Add(3 * time.Hour), End: now.Add(4 * time.Hour), Power: 11000, Price: 0.40},
+			},
+			Cost:   7.70,
+			Energy: 22,
+		}},
+		Cost:     7.70,
+		Energy:   22,
+		Deadline: now.Add(8 * time.Hour),
+	}
+	s.mu.Lock()
+	s.current = original
+	s.mu.Unlock()
+	s.saveCurrent()
+
+	// Simulate restart: build a fresh Scheduler against the same store.
+	restored := &Scheduler{
+		charger:  &mockCharger{},
+		store:    st,
+		log:      s.log,
+		notifyCh: make(chan struct{}, 1),
+	}
+	restored.loadPersistedSchedule()
+
+	require.NotNil(t, restored.current, "schedule must be restored")
+	require.Len(t, restored.current.Slots, 1)
+	require.Len(t, restored.current.Slots[0].Periods, 2)
+	assert.Equal(t, original.Slots[0].Periods[0].Start.Unix(), restored.current.Slots[0].Periods[0].Start.Unix())
+	assert.Equal(t, original.Slots[0].Periods[1].End.Unix(), restored.current.Slots[0].Periods[1].End.Unix())
+	assert.Equal(t, 11000.0, restored.current.Slots[0].Periods[0].Power)
+}
+
+// A persisted slot whose every period is in the past should not be restored.
+func TestPersistedSchedulePrunesPastSlots(t *testing.T) {
+	mock := &mockCharger{}
+	s, st := newTestScheduler(t, mock)
+
+	now := time.Now().Truncate(time.Hour)
+	original := &Schedule{
+		Slots: []ScheduleSlot{
+			// Past slot — entirely in the past.
+			{
+				Date: now.Add(-24 * time.Hour).Format("2006-01-02"),
+				Periods: []SchedulePeriod{
+					{Start: now.Add(-25 * time.Hour), End: now.Add(-24 * time.Hour), Power: 11000},
+				},
+			},
+			// Future slot — keep.
+			{
+				Date: now.Format("2006-01-02"),
+				Periods: []SchedulePeriod{
+					{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
+				},
+			},
+		},
+	}
+	s.mu.Lock()
+	s.current = original
+	s.mu.Unlock()
+	s.saveCurrent()
+
+	restored := &Scheduler{
+		charger:  &mockCharger{},
+		store:    st,
+		log:      s.log,
+		notifyCh: make(chan struct{}, 1),
+	}
+	restored.loadPersistedSchedule()
+
+	require.NotNil(t, restored.current)
+	require.Len(t, restored.current.Slots, 1, "past slot pruned, future slot kept")
+	assert.Equal(t, now.Format("2006-01-02"), restored.current.Slots[0].Date)
+}
+
+// A persisted schedule with NO live periods should result in s.current == nil.
+func TestPersistedScheduleAllPastResultsNil(t *testing.T) {
+	mock := &mockCharger{}
+	s, st := newTestScheduler(t, mock)
+
+	now := time.Now().Truncate(time.Hour)
+	original := &Schedule{
+		Slots: []ScheduleSlot{{
+			Date: now.Add(-24 * time.Hour).Format("2006-01-02"),
+			Periods: []SchedulePeriod{
+				{Start: now.Add(-25 * time.Hour), End: now.Add(-24 * time.Hour), Power: 11000},
+			},
+		}},
+	}
+	s.mu.Lock()
+	s.current = original
+	s.mu.Unlock()
+	s.saveCurrent()
+
+	restored := &Scheduler{
+		charger:  &mockCharger{},
+		store:    st,
+		log:      s.log,
+		notifyCh: make(chan struct{}, 1),
+	}
+	restored.loadPersistedSchedule()
+
+	assert.Nil(t, restored.current, "all-past schedule must not be restored")
+}
+
+// ClearSchedule must persist the empty state so a stale schedule isn't
+// restored on next startup.
+func TestClearSchedulePersistsEmpty(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Available", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+
+	now := time.Now().Truncate(time.Hour)
+	s.mu.Lock()
+	s.current = &Schedule{
+		Slots: []ScheduleSlot{{
+			Date: now.Format("2006-01-02"),
+			Periods: []SchedulePeriod{
+				{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
+			},
+		}},
+	}
+	s.mu.Unlock()
+	s.saveCurrent()
+
+	// Verify it persisted.
+	require.NotEmpty(t, st.GetDefault(persistedScheduleKey, ""))
+
+	s.ClearSchedule()
+
+	// Now should be empty.
+	assert.Empty(t, st.GetDefault(persistedScheduleKey, ""), "ClearSchedule must clear persisted blob")
+
+	// And a "restart" should not restore anything.
+	restored := &Scheduler{
+		charger:  &mockCharger{},
+		store:    st,
+		log:      s.log,
+		notifyCh: make(chan struct{}, 1),
+	}
+	restored.loadPersistedSchedule()
+	assert.Nil(t, restored.current)
+}
+
+// Garbage in the persisted blob must not crash; loadPersistedSchedule
+// should log a warning and continue with no schedule.
+func TestPersistedScheduleHandlesCorruptBlob(t *testing.T) {
+	mock := &mockCharger{}
+	_, st := newTestScheduler(t, mock)
+	require.NoError(t, st.Set(persistedScheduleKey, "{not valid json"))
+
+	restored := &Scheduler{
+		charger:  &mockCharger{},
+		store:    st,
+		log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		notifyCh: make(chan struct{}, 1),
+	}
+	restored.loadPersistedSchedule()
+	assert.Nil(t, restored.current)
 }

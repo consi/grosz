@@ -26,7 +26,7 @@ interface SessionReport {
   grandTotalCost: number;
   distance: number;
   costPer100km: number;
-  whPerKm: number;
+  kwhPer100km: number;
 }
 
 const PAGE_SIZE = 50;
@@ -223,8 +223,8 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
               <div className="report-label">{t('report.plnPer100km')}</div>
             </div>
             <div className="report-stat">
-              <div className="report-value">{report.distance > 0 ? report.whPerKm.toFixed(0) : '-'}</div>
-              <div className="report-label">{t('report.whPerKm')}</div>
+              <div className="report-value">{report.distance > 0 ? report.kwhPer100km.toFixed(1) : '-'}</div>
+              <div className="report-label">{t('report.kwhPer100km')}</div>
             </div>
           </div>
         ) : null}

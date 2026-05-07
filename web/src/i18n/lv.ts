@@ -130,7 +130,7 @@ const lv: Translations = {
   'report.plnTotal': 'PLN kop\u0101',
   'report.kmDriven': 'km nobraukti',
   'report.plnPer100km': 'PLN/100km',
-  'report.whPerKm': 'Wh/km',
+  'report.kwhPer100km': 'kWh/100km',
 
   'cost.heading': 'Pievienot \u0101r\u0113j\u0101s izmaksas',
   'cost.date': 'Datums',

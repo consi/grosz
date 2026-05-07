@@ -58,6 +58,67 @@ func TestBuildProfileNil(t *testing.T) {
 	assert.Nil(t, BuildProfile(&Schedule{}, 11000))
 }
 
+// Hourly periods with same power and no gap should consolidate into a
+// single OCPP period — the charger sees one continuous block. The user-
+// facing hourly granularity is preserved separately in the Schedule data
+// model.
+func TestBuildProfileConsolidatesAdjacentSamePower(t *testing.T) {
+	now := time.Now().Truncate(time.Hour)
+	sched := &Schedule{
+		Slots: []ScheduleSlot{
+			{
+				Date: "2026-01-01",
+				Periods: []SchedulePeriod{
+					{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30},
+					{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000, Price: 0.40},
+					{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000, Price: 0.50},
+				},
+			},
+		},
+	}
+
+	profile := BuildProfile(sched, 11000)
+	require.NotNil(t, profile)
+
+	periods := profile.ChargingSchedule.ChargingSchedulePeriod
+	require.Len(t, periods, 2, "three adjacent same-power hours should produce one charge period + one zero closer")
+
+	assert.Equal(t, 0, periods[0].StartPeriod)
+	assert.Equal(t, float64(11000), periods[0].Limit)
+	assert.Equal(t, 3*3600, periods[1].StartPeriod, "zero closer at 3h (true end of block)")
+	assert.Equal(t, float64(0), periods[1].Limit)
+}
+
+// Adjacent periods with different power must NOT be consolidated — the
+// charger needs to see the power transition.
+func TestBuildProfilePreservesPowerChangeAtBoundary(t *testing.T) {
+	now := time.Now().Truncate(time.Hour)
+	sched := &Schedule{
+		Slots: []ScheduleSlot{
+			{
+				Date: "2026-01-01",
+				Periods: []SchedulePeriod{
+					{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30},
+					{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 7000, Price: 0.40},
+				},
+			},
+		},
+	}
+
+	profile := BuildProfile(sched, 11000)
+	require.NotNil(t, profile)
+
+	periods := profile.ChargingSchedule.ChargingSchedulePeriod
+	require.Len(t, periods, 3, "power change must be preserved as separate OCPP periods")
+
+	assert.Equal(t, 0, periods[0].StartPeriod)
+	assert.Equal(t, float64(11000), periods[0].Limit)
+	assert.Equal(t, 3600, periods[1].StartPeriod)
+	assert.Equal(t, float64(7000), periods[1].Limit)
+	assert.Equal(t, 2*3600, periods[2].StartPeriod)
+	assert.Equal(t, float64(0), periods[2].Limit)
+}
+
 func TestBuildProfileSkipsCancelledSlots(t *testing.T) {
 	now := time.Now().Truncate(time.Hour)
 	sched := &Schedule{

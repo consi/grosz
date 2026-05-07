@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// ConsumptionWindowDays is the trailing window used for moving-average
+// efficiency metrics (kWh/100km and Wh/km).
+const ConsumptionWindowDays = 30
+
 // Session represents a charging session (transaction).
 type Session struct {
 	ID            int64      `json:"id"`
@@ -19,33 +23,40 @@ type Session struct {
 	MeterStop     float64    `json:"meterStop,omitempty"`
 	Energy        float64    `json:"energy"`
 	Cost          float64    `json:"cost,omitempty"`
-	Status        string     `json:"status"` // "active", "completed", "error"
-	Distance      float64    `json:"distance,omitempty"`      // km driven since previous charge (computed)
-	KWhPer100km   float64    `json:"kwhPer100km,omitempty"`   // consumption (computed)
+	Status        string     `json:"status"`                // "active", "completed", "error"
+	Distance      float64    `json:"distance,omitempty"`    // km driven between previous session's stop and this session's start
+	KWhPer100km   float64    `json:"kwhPer100km,omitempty"` // trailing 30-day moving average kWh/100km
 }
 
-// EnrichWithOdometer computes distance and consumption for each session
-// based on odometer deltas between consecutive sessions.
-// Sessions must be sorted newest-first (as returned by query).
-func (s *Store) EnrichWithOdometer(sessions []Session) {
-	for i := range sessions {
-		if sessions[i].Status != "completed" || sessions[i].Energy <= 0 {
-			continue
-		}
-		// Previous session in time is at i+1 (list is newest-first)
-		var prevStop time.Time
-		if i+1 < len(sessions) && sessions[i+1].StopTime != nil {
-			prevStop = *sessions[i+1].StopTime
-		}
-		if prevStop.IsZero() {
-			continue
-		}
-		dist, _ := s.OdometerDelta(prevStop, sessions[i].StartTime)
-		if dist > 0 {
-			sessions[i].Distance = dist
-			sessions[i].KWhPer100km = (sessions[i].Energy / dist) * 100
-		}
+// ConsumptionWindow returns total charging energy (kWh) and odometer distance
+// (km) over the trailing ConsumptionWindowDays window ending at anchor. The
+// window is half-open (from, anchor] so the anchor itself is included.
+// ok is true only when both numerator and denominator are positive.
+func (s *Store) ConsumptionWindow(anchor time.Time) (energy, distance float64, ok bool, err error) {
+	from := anchor.Add(-time.Duration(ConsumptionWindowDays) * 24 * time.Hour)
+	fromStr := from.UTC().Format(time.RFC3339)
+	toStr := anchor.UTC().Format(time.RFC3339)
+
+	if err = s.db.QueryRow(
+		`SELECT COALESCE(SUM(energy), 0) FROM charging_sessions
+		 WHERE start_time > ? AND start_time <= ? AND status = 'completed'`,
+		fromStr, toStr,
+	).Scan(&energy); err != nil {
+		return 0, 0, false, fmt.Errorf("consumption window energy: %w", err)
 	}
+
+	if err = s.db.QueryRow(
+		`SELECT COALESCE(MAX(mileage) - MIN(mileage), 0) FROM odometer_readings
+		 WHERE timestamp > ? AND timestamp <= ?`,
+		fromStr, toStr,
+	).Scan(&distance); err != nil {
+		return 0, 0, false, fmt.Errorf("consumption window distance: %w", err)
+	}
+	if distance < 0 {
+		distance = 0
+	}
+	ok = energy > 0 && distance > 0
+	return energy, distance, ok, nil
 }
 
 // StartSession inserts a new active charging session.
@@ -66,7 +77,8 @@ func (s *Store) StartSession(sess Session) error {
 	return nil
 }
 
-// StopSession completes a charging session.
+// StopSession completes a charging session and persists the per-session
+// distance (km since previous session) and the trailing 30-day kWh/100km.
 func (s *Store) StopSession(txnID int, stopTime time.Time, meterStop, energy, cost float64) error {
 	result, err := s.db.Exec(
 		`UPDATE charging_sessions SET stop_time = ?, meter_stop = ?, energy = ?, cost = ?, status = 'completed'
@@ -83,6 +95,47 @@ func (s *Store) StopSession(txnID int, stopTime time.Time, meterStop, energy, co
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+
+	// Look up the row we just stopped so we know its id and start_time.
+	var sessID int64
+	var startStr string
+	if err := s.db.QueryRow(
+		`SELECT id, start_time FROM charging_sessions WHERE transaction_id = ? AND status = 'completed'`,
+		txnID,
+	).Scan(&sessID, &startStr); err != nil {
+		return nil // best-effort: persistence of derived metrics never fails the stop
+	}
+	startTime, err := time.Parse(time.RFC3339, startStr)
+	if err != nil {
+		return nil
+	}
+
+	// Per-session distance: km between previous completed session's stop and this session's start.
+	var distance float64
+	var prevStopStr sql.NullString
+	_ = s.db.QueryRow(
+		`SELECT MAX(stop_time) FROM charging_sessions
+		 WHERE status = 'completed' AND stop_time IS NOT NULL AND id <> ? AND stop_time < ?`,
+		sessID, startTime.UTC().Format(time.RFC3339),
+	).Scan(&prevStopStr)
+	if prevStopStr.Valid {
+		if prevStop, err := time.Parse(time.RFC3339, prevStopStr.String); err == nil {
+			distance, _ = s.OdometerDelta(prevStop, startTime)
+		}
+	}
+
+	// Trailing 30-day kWh/100km anchored at stop time.
+	var kwhPer100 sql.NullFloat64
+	if winEnergy, winDist, ok, _ := s.ConsumptionWindow(stopTime); ok {
+		kwhPer100 = sql.NullFloat64{Float64: (winEnergy / winDist) * 100, Valid: true}
+	}
+
+	if _, err := s.db.Exec(
+		`UPDATE charging_sessions SET distance_km = ?, kwh_per_100km = ? WHERE id = ?`,
+		distance, kwhPer100, sessID,
+	); err != nil {
+		return nil
 	}
 	return nil
 }
@@ -111,7 +164,7 @@ func (s *Store) SessionsOverlapping(start, end time.Time) (bool, error) {
 func (s *Store) ActiveSession() (*Session, error) {
 	return s.scanSession(
 		s.db.QueryRow(
-			`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status
+			`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status, distance_km, kwh_per_100km
 			 FROM charging_sessions WHERE status = 'active' LIMIT 1`,
 		),
 	)
@@ -120,7 +173,7 @@ func (s *Store) ActiveSession() (*Session, error) {
 // SessionHistory returns sessions, newest first, with pagination.
 func (s *Store) SessionHistory(limit, offset int) ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status
+		`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status, distance_km, kwh_per_100km
 		 FROM charging_sessions ORDER BY id DESC LIMIT ? OFFSET ?`,
 		limit, offset,
 	)
@@ -143,7 +196,7 @@ func (s *Store) SessionHistory(limit, offset int) ([]Session, error) {
 // SessionsByDateRange returns sessions within a date range, newest first.
 func (s *Store) SessionsByDateRange(from, to time.Time, limit, offset int) ([]Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status
+		`SELECT id, charge_box, connector_id, transaction_id, id_tag, start_time, stop_time, meter_start, meter_stop, energy, cost, status, distance_km, kwh_per_100km
 		 FROM charging_sessions
 		 WHERE start_time >= ? AND start_time < ?
 		 ORDER BY id DESC LIMIT ? OFFSET ?`,
@@ -179,8 +232,8 @@ type SessionReport struct {
 	ExternalCosts  float64 `json:"externalCosts"`  // PLN (manually added)
 	GrandTotalCost float64 `json:"grandTotalCost"` // charging + idle + external
 	Distance       float64 `json:"distance"`       // km (odometer delta)
-	CostPer100km   float64 `json:"costPer100km"`   // PLN/100km
-	WhPerKm        float64 `json:"whPerKm"`        // energy efficiency
+	CostPer100km   float64 `json:"costPer100km"`   // PLN/100km (range-based)
+	KWhPer100km    float64 `json:"kwhPer100km"`    // trailing 30-day moving average kWh/100km
 }
 
 // SessionReportByRange computes aggregated stats for sessions in a date range,
@@ -203,26 +256,41 @@ func (s *Store) SessionReportByRange(from, to time.Time) (*SessionReport, error)
 		r.AvgCostPerKWh = r.TotalCost / r.TotalEnergy
 	}
 
-	// Compute total meter consumption for the period
-	var totalMeterWh float64
-	meterRow := s.db.QueryRow(
-		`SELECT COALESCE(MAX(energy_wh) - MIN(energy_wh), 0)
-		 FROM meter_readings
-		 WHERE timestamp >= ? AND timestamp < ?`,
-		from.UTC().Format(time.RFC3339),
-		to.UTC().Format(time.RFC3339),
-	)
-	_ = meterRow.Scan(&totalMeterWh)
-	totalMeterKWh := totalMeterWh / 1000.0
-
-	// Idle = total meter consumption minus charging
-	if totalMeterKWh > r.TotalEnergy {
-		r.IdleEnergy = totalMeterKWh - r.TotalEnergy
-		r.IdleCost = s.CalculateSessionCost(from, to, r.IdleEnergy)
+	// Idle = sum of meter deltas in non-charging windows. For ranges that
+	// extend past the meter_readings retention horizon, the older portion
+	// falls back to the daily_idle snapshot (which is already kept on the
+	// new formula by the snapshot loop).
+	earliestMeter, hasMeter := s.earliestMeterTimestamp()
+	liveStart := from
+	if hasMeter && earliestMeter.After(liveStart) {
+		liveStart = earliestMeter
 	}
 
-	// Fall back to persisted daily_idle when meter data is purged
-	if r.IdleEnergy == 0 {
+	if liveStart.Before(to) {
+		windows, err := s.nonChargingWindows(liveStart, to)
+		if err != nil {
+			return nil, fmt.Errorf("idle windows: %w", err)
+		}
+		for _, w := range windows {
+			delta, err := s.MeterDeltaKWh(w.Start, w.End)
+			if err != nil {
+				return nil, err
+			}
+			if delta <= 0 {
+				continue
+			}
+			r.IdleEnergy += delta
+			r.IdleCost += s.CalculateSessionCost(w.Start, w.End, delta)
+		}
+	}
+
+	// Fold in the snapshot-only portion (days before retention) when present.
+	if hasMeter && earliestMeter.After(from) {
+		oldEnergy, oldCost, _ := s.SumDailyIdle(from, earliestMeter)
+		r.IdleEnergy += oldEnergy
+		r.IdleCost += oldCost
+	} else if !hasMeter {
+		// No meter data at all in the range — fall back entirely.
 		r.IdleEnergy, r.IdleCost, _ = s.SumDailyIdle(from, to)
 	}
 
@@ -230,11 +298,16 @@ func (s *Store) SessionReportByRange(from, to time.Time) (*SessionReport, error)
 	r.ExternalCosts, _ = s.ExternalCostSumByDateRange(from, to)
 	r.GrandTotalCost = r.TotalCost + r.IdleCost + r.ExternalCosts
 
-	// Distance and efficiency
+	// Distance (range-based) and PLN/100km (range-based accounting figure).
 	r.Distance, _ = s.OdometerDelta(from, to)
 	if r.Distance > 0 {
 		r.CostPer100km = r.GrandTotalCost / (r.Distance / 100)
-		r.WhPerKm = (r.TotalEnergy * 1000) / r.Distance
+	}
+
+	// kWh/100km uses trailing 30-day moving average anchored at `to`, so the
+	// efficiency indicator is independent of the report range.
+	if winEnergy, winDist, ok, _ := s.ConsumptionWindow(to); ok {
+		r.KWhPer100km = (winEnergy / winDist) * 100
 	}
 
 	return &r, nil
@@ -261,11 +334,13 @@ func (s *Store) scanSession(row *sql.Row) (*Session, error) {
 	var stopStr sql.NullString
 	var idTag sql.NullString
 	var meterStop, energy, cost sql.NullFloat64
+	var distance, kwhPer100 sql.NullFloat64
 
 	err := row.Scan(
 		&sess.ID, &sess.ChargeBox, &sess.ConnectorID, &sess.TransactionID,
 		&idTag, &startStr, &stopStr, &sess.MeterStart,
 		&meterStop, &energy, &cost, &sess.Status,
+		&distance, &kwhPer100,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -291,6 +366,12 @@ func (s *Store) scanSession(row *sql.Row) (*Session, error) {
 	if cost.Valid {
 		sess.Cost = cost.Float64
 	}
+	if distance.Valid {
+		sess.Distance = distance.Float64
+	}
+	if kwhPer100.Valid {
+		sess.KWhPer100km = kwhPer100.Float64
+	}
 	return &sess, nil
 }
 
@@ -304,11 +385,13 @@ func (s *Store) scanSessionFromScanner(scanner interface{ Scan(dest ...any) erro
 	var stopStr sql.NullString
 	var idTag sql.NullString
 	var meterStop, energy, cost sql.NullFloat64
+	var distance, kwhPer100 sql.NullFloat64
 
 	err := scanner.Scan(
 		&sess.ID, &sess.ChargeBox, &sess.ConnectorID, &sess.TransactionID,
 		&idTag, &startStr, &stopStr, &sess.MeterStart,
 		&meterStop, &energy, &cost, &sess.Status,
+		&distance, &kwhPer100,
 	)
 	if err != nil {
 		return sess, fmt.Errorf("scan session: %w", err)
@@ -330,6 +413,12 @@ func (s *Store) scanSessionFromScanner(scanner interface{ Scan(dest ...any) erro
 	}
 	if cost.Valid {
 		sess.Cost = cost.Float64
+	}
+	if distance.Valid {
+		sess.Distance = distance.Float64
+	}
+	if kwhPer100.Valid {
+		sess.KWhPer100km = kwhPer100.Float64
 	}
 
 	return sess, nil

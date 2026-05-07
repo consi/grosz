@@ -75,8 +75,8 @@ type mockTariff struct {
 }
 
 func (m *mockTariff) Rates() ([]tariff.Rate, error) { return m.rates, nil }
-func (m *mockTariff) Name() string                   { return "mock" }
-func (m *mockTariff) Stop()                          {}
+func (m *mockTariff) Name() string                  { return "mock" }
+func (m *mockTariff) Stop()                         {}
 
 // --- helpers ---
 
@@ -1260,4 +1260,108 @@ func TestSendStart_StillEmitsStartMarker(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, startCount)
+}
+
+// --- OnModeChanged ---
+
+func TestOnModeChanged_OffToForce_StartsTxn(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "force")
+
+	s.OnModeChanged("off", "force")
+
+	assert.Equal(t, 1, mock.starts, "explicit user mode change must start synchronously")
+	assert.Equal(t, 0, mock.stops)
+}
+
+// User explicitly forces charging in SuspendedEV state. Zappi may ignore
+// the RemoteStart, but the user's intent is honored — and the override is
+// recorded in the system event for diagnostics.
+func TestOnModeChanged_BypassesSuspendedEV(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "SuspendedEV", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "force")
+
+	s.OnModeChanged("schedule", "force")
+
+	assert.Equal(t, 1, mock.starts, "forced mode change must bypass SuspendedEV gate")
+}
+
+// A stuck cooldown (e.g., from an earlier RemoteStart that timed out in the
+// cloud proxy) must NOT silently swallow a fresh user-driven mode change.
+func TestOnModeChanged_ClearsCooldown(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "force")
+	s.lastStartSent = time.Now() // simulate a recent stuck send
+
+	s.OnModeChanged("off", "force")
+
+	assert.Equal(t, 1, mock.starts, "mode change must clear stale cooldown and try the start")
+}
+
+func TestOnModeChanged_AnyToOff_StopsTxn(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "off")
+
+	s.OnModeChanged("force", "off")
+
+	assert.Equal(t, 1, mock.stops, "Off mode must stop the active transaction")
+	assert.Equal(t, 0, mock.starts)
+}
+
+// Off→Schedule with a plugged car and an active scheduled window: explicit
+// mode change must start within the window (no 5s debounce + 30s tick wait).
+func TestOnModeChanged_OffToSchedule_StartsInWindow(t *testing.T) {
+	now := time.Now()
+	origTimeNow := timeNow
+	timeNow = func() time.Time { return now }
+	defer func() { timeNow = origTimeNow }()
+
+	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	s.current = &Schedule{
+		Slots: []ScheduleSlot{{
+			Date: now.Format("2006-01-02"),
+			Periods: []SchedulePeriod{{
+				Start: now.Add(-30 * time.Minute),
+				End:   now.Add(30 * time.Minute),
+				Power: 11000,
+			}},
+		}},
+	}
+
+	s.OnModeChanged("off", "schedule")
+
+	assert.Equal(t, 1, mock.starts)
+}
+
+// Schedule mode without an active window: OnModeChanged must not start —
+// schedule mode still respects the schedule, even when explicitly switched.
+func TestOnModeChanged_ToSchedule_NoStartOutsideWindow(t *testing.T) {
+	now := time.Now()
+	origTimeNow := timeNow
+	timeNow = func() time.Time { return now }
+	defer func() { timeNow = origTimeNow }()
+
+	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	s.current = &Schedule{
+		Slots: []ScheduleSlot{{
+			Date: now.Format("2006-01-02"),
+			Periods: []SchedulePeriod{{
+				Start: now.Add(1 * time.Hour),
+				End:   now.Add(2 * time.Hour),
+				Power: 11000,
+			}},
+		}},
+	}
+
+	s.OnModeChanged("off", "schedule")
+
+	assert.Equal(t, 0, mock.starts, "schedule mode still respects window even on explicit switch")
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -79,6 +80,8 @@ func (s *Store) migrate() error {
 			status         TEXT NOT NULL DEFAULT 'active'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_status ON charging_sessions(status)`,
+		`ALTER TABLE charging_sessions ADD COLUMN kwh_per_100km REAL`,
+		`ALTER TABLE charging_sessions ADD COLUMN distance_km REAL`,
 
 		`CREATE TABLE IF NOT EXISTS tariff_rates (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,6 +193,10 @@ func (s *Store) migrate() error {
 
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
+			if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(m)), "ALTER TABLE") &&
+				strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
 			return fmt.Errorf("exec migration: %w\nSQL: %s", err, m)
 		}
 	}

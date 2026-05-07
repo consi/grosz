@@ -146,7 +146,7 @@ const pl: Translations = {
   'report.plnTotal': 'PLN razem',
   'report.kmDriven': 'km przejechane',
   'report.plnPer100km': 'PLN/100km',
-  'report.whPerKm': 'Wh/km',
+  'report.kwhPer100km': 'kWh/100km',
 
   'cost.heading': 'Dodaj koszt zewn\u0119trzny',
   'cost.date': 'Data',

@@ -130,7 +130,7 @@ const uk: Translations = {
   'report.plnTotal': 'PLN \u0437\u0430\u0433\u0430\u043b\u043e\u043c',
   'report.kmDriven': 'km \u043f\u0440\u043e\u0457\u0445\u0430\u043d\u043e',
   'report.plnPer100km': 'PLN/100km',
-  'report.whPerKm': 'Wh/km',
+  'report.kwhPer100km': 'kWh/100km',
 
   'cost.heading': '\u0414\u043e\u0434\u0430\u0442\u0438 \u0437\u043e\u0432\u043d\u0456\u0448\u043d\u0456 \u0432\u0438\u0442\u0440\u0430\u0442\u0438',
   'cost.date': '\u0414\u0430\u0442\u0430',

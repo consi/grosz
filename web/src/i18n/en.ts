@@ -154,7 +154,7 @@ const en = {
   'report.plnTotal': 'PLN total',
   'report.kmDriven': 'km driven',
   'report.plnPer100km': 'PLN/100km',
-  'report.whPerKm': 'Wh/km',
+  'report.kwhPer100km': 'kWh/100km',
 
   // Cost
   'cost.heading': 'Add External Cost',

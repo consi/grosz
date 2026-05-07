@@ -14,7 +14,10 @@ var timeNow = time.Now
 
 // BuildProfile converts a Schedule into an OCPP 1.6 ChargingProfile
 // using TxDefaultProfile with absolute schedule.
-// Only active (non-cancelled) slots are included.
+// Only active (non-cancelled) slots are included. Adjacent same-power
+// hourly periods are consolidated into a single OCPP ChargingSchedulePeriod
+// so the charger sees one continuous block — the user-facing hourly
+// granularity is preserved separately in the Schedule data model.
 func BuildProfile(sched *Schedule, maxPowerW float64) *types.ChargingProfile {
 	periods := sched.ActivePeriods()
 	if len(periods) == 0 {
@@ -28,6 +31,14 @@ func BuildProfile(sched *Schedule, maxPowerW float64) *types.ChargingProfile {
 	lastEnd := earliest
 
 	for _, p := range periods {
+		// Adjacent same-power period: already covered by the previous OCPP
+		// emit. Just advance lastEnd so the trailing zero-power closes at
+		// the true end of the continuous block.
+		if len(ocppPeriods) > 0 && p.Start.Equal(lastEnd) && p.Power == ocppPeriods[len(ocppPeriods)-1].Limit {
+			lastEnd = p.End
+			continue
+		}
+
 		// If there's a gap before this period, insert a zero-power period
 		if p.Start.After(lastEnd) {
 			startPeriod := int(lastEnd.Sub(earliest).Seconds())

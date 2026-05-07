@@ -447,6 +447,8 @@ func (s *Server) handleSetChargerMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldMode := s.store.GetDefault("charger.mode", "schedule")
+
 	if err := s.store.Set("charger.mode", req.Mode); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -459,9 +461,11 @@ func (s *Server) handleSetChargerMode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Notify scheduler to enforce the new mode immediately
+	// Synchronously enforce the new mode: clear cooldowns, run controlCharging
+	// against the explicit new mode, then schedule a recompute. Replaces the
+	// old debounced Notify() path that could take 5s + 30s to act.
 	if s.scheduler != nil {
-		s.scheduler.Notify()
+		s.scheduler.OnModeChanged(oldMode, req.Mode)
 	}
 
 	writeJSON(w, map[string]any{"ok": true, "mode": req.Mode})
@@ -529,7 +533,6 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.EnrichWithOdometer(sessions)
 	writeJSON(w, map[string]any{"sessions": sessions, "total": total})
 }
 
@@ -670,11 +673,11 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 	// Report summary grid
 	distStr := "-"
 	costPer100 := "-"
-	whPerKm := "-"
+	kwhPer100 := "-"
 	if report.Distance > 0 {
 		distStr = fmt.Sprintf("%.0f", report.Distance)
 		costPer100 = fmt.Sprintf("%.2f", report.CostPer100km)
-		whPerKm = fmt.Sprintf("%.0f", report.WhPerKm)
+		kwhPer100 = fmt.Sprintf("%.1f", report.KWhPer100km)
 	}
 
 	_, _ = fmt.Fprintf(w, `<div class="grid">
@@ -689,12 +692,12 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
   <div class="stat highlight"><div class="stat-value">%.2f</div><div class="stat-label">PLN total</div></div>
   <div class="stat"><div class="stat-value">%s</div><div class="stat-label">km driven</div></div>
   <div class="stat highlight"><div class="stat-value">%s</div><div class="stat-label">PLN/100km</div></div>
-  <div class="stat"><div class="stat-value">%s</div><div class="stat-label">Wh/km</div></div>
+  <div class="stat"><div class="stat-value">%s</div><div class="stat-label">kWh/100km 30d</div></div>
 </div>
 `,
 		report.TotalSessions, report.TotalEnergy, report.TotalCost, report.AvgCostPerKWh,
 		report.TotalDuration, report.IdleEnergy, report.IdleCost, report.ExternalCosts,
-		report.GrandTotalCost, distStr, costPer100, whPerKm)
+		report.GrandTotalCost, distStr, costPer100, kwhPer100)
 
 	// Cost log table
 	if len(logItems) > 0 {
@@ -710,7 +713,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 			cost := fmt.Sprintf("%.2f PLN", item.Cost)
 			desc := item.Description
 			if item.Type == "charging" && item.Distance > 0 {
-				desc += fmt.Sprintf(" (%.0f km, %.1f kWh/100km)", item.Distance, item.KWhPer100km)
+				desc += fmt.Sprintf(" (%.0f km since prev, %.1f kWh/100km 30d avg)", item.Distance, item.KWhPer100km)
 			}
 			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%s</td><td class=\"num\">%s</td></tr>\n",
 				item.Date, item.Type, desc, energy, cost)
