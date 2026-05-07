@@ -1048,10 +1048,6 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 	}
 }
 
-func (s *Scheduler) sendStart(cpID, mode string) {
-	s.sendStartForced(cpID, mode, false)
-}
-
 func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool) {
 	if !s.lastStartSent.IsZero() && time.Since(s.lastStartSent) < remoteCmdCooldown {
 		s.log.Debug("remote start already sent, waiting for cloud proxy",
