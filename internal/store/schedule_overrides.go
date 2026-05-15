@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // ScheduleOverride is a user-asserted charging window or block applied on top
@@ -137,9 +139,13 @@ func (s *Store) LoadOverrides(after time.Time) ([]ScheduleOverride, error) {
 
 // PurgeOldOverrides removes overrides whose End is before the cutoff.
 func (s *Store) PurgeOldOverrides(before time.Time) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`DELETE FROM schedule_overrides WHERE end_time < ?`,
 		before.UTC().Format(time.RFC3339),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	emitPurgeBefore(s, events.ActionPurgeOverrides, before, res)
+	return nil
 }

@@ -19,12 +19,15 @@ export function useSSE(url: string | null, handler: SSEHandler, onAuthError?: ()
     es.addEventListener('schedule', (e) => handlerRef.current('schedule', e.data));
     es.addEventListener('rates', (e) => handlerRef.current('rates', e.data));
     es.addEventListener('meter', (e) => handlerRef.current('meter', e.data));
+    es.addEventListener('bootid', (e) => handlerRef.current('bootid', e.data));
 
     es.onerror = () => {
       es.close();
-      // Check if auth is still valid before reconnecting
+      // Check if auth is still valid before reconnecting. Only treat an
+      // explicit 401 as auth failure — 502/503 from the proxy while the
+      // backend is still restarting is a transient condition, not a logout.
       fetch('/api/auth/check').then((r) => {
-        if (!r.ok && onAuthErrorRef.current) {
+        if (r.status === 401 && onAuthErrorRef.current) {
           onAuthErrorRef.current();
         } else {
           setTimeout(connect, 3000);

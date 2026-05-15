@@ -7,6 +7,8 @@ import (
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // statusCheckIdleInterval is how long the loop sleeps when the threshold
@@ -154,5 +156,14 @@ func (c *StatusChecker) fireTrigger(cpID string) {
 	}
 	if err != nil {
 		c.log.Warn("status check TriggerMessage failed", "cpID", cpID, "err", err)
+		c.s.events.Error(events.ActionStatusCheckTriggered,
+			map[string]any{"cpID": cpID, "reason": "stale_or_unknown"},
+			err,
+		)
+		return
 	}
+	c.s.events.Info(events.ActionStatusCheckTriggered,
+		map[string]any{"cpID": cpID, "reason": "stale_or_unknown"},
+		map[string]any{"ok": true},
+	)
 }

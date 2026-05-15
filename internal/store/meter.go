@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // MeterReading is a single snapshot from the energy meter.
@@ -36,8 +38,12 @@ func (s *Store) InsertMeterReading(r MeterReading) error {
 // PurgeMeterReadings deletes readings older than the given duration.
 func (s *Store) PurgeMeterReadings(maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`DELETE FROM meter_readings WHERE timestamp < ?`, cutoff)
-	return err
+	res, err := s.db.Exec(`DELETE FROM meter_readings WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return err
+	}
+	emitPurge(s, events.ActionPurgeMeterReadings, maxAge, res)
+	return nil
 }
 
 // HourlyConsumption computes energy consumed per hour from cumulative readings.
@@ -132,8 +138,12 @@ func (s *Store) RecentPhaseReadings(minutes int) ([]PhaseReading, error) {
 // PurgePhaseReadings deletes phase readings older than the given duration.
 func (s *Store) PurgePhaseReadings(maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`DELETE FROM phase_readings WHERE timestamp < ?`, cutoff)
-	return err
+	res, err := s.db.Exec(`DELETE FROM phase_readings WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return err
+	}
+	emitPurge(s, events.ActionPurgePhaseReadings, maxAge, res)
+	return nil
 }
 
 // ChartMarker represents a timestamped event for the price chart.
@@ -180,8 +190,12 @@ func (s *Store) RecentChartMarkers(hours int) ([]ChartMarker, error) {
 // PurgeChartMarkers deletes markers older than the given duration.
 func (s *Store) PurgeChartMarkers(maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`DELETE FROM chart_markers WHERE timestamp < ?`, cutoff)
-	return err
+	res, err := s.db.Exec(`DELETE FROM chart_markers WHERE timestamp < ?`, cutoff)
+	if err != nil {
+		return err
+	}
+	emitPurge(s, events.ActionPurgeChartMarkers, maxAge, res)
+	return nil
 }
 
 // MeterDeltaKWh returns energy consumed in [start, end), measured as the

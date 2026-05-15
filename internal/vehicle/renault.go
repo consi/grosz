@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -48,6 +49,7 @@ type BatteryStatus struct {
 // Renault polls the MyRenault/Kamereon API for battery SoC.
 type Renault struct {
 	store       *store.Store
+	events      *events.Bound
 	log         *slog.Logger
 	client      *http.Client
 	kamereonURL string
@@ -76,6 +78,7 @@ func NewRenaultWithURL(st *store.Store, log *slog.Logger, kamereonURL string) *R
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Renault{
 		store:       st,
+		events:      events.For(events.SourceRenault, st),
 		log:         log.With("component", "renault"),
 		client:      &http.Client{Timeout: 15 * time.Second},
 		kamereonURL: kamereonURL,
@@ -148,11 +151,10 @@ func (r *Renault) loop(ctx context.Context) {
 			if len(vinSuffix) > 4 {
 				vinSuffix = vinSuffix[len(vinSuffix)-4:]
 			}
-			_ = r.store.RecordSystemEvent(store.SystemEvent{
-				Timestamp: time.Now(), Source: "renault", Action: "poll", Level: "warn",
-				Input:  map[string]any{"vin": vinSuffix},
-				Result: map[string]any{"error": err.Error(), "socReset": true},
-			})
+			r.events.Warn(events.ActionRenaultPoll,
+				map[string]any{"vin": vinSuffix},
+				map[string]any{"error": err.Error(), "socReset": true},
+			)
 		}
 
 		interval := r.store.GetInt("vehicle.poll_interval", 15)
@@ -240,17 +242,16 @@ func (r *Renault) poll(user, pass, vin string) error {
 	if len(vinSuffix) > 4 {
 		vinSuffix = vinSuffix[len(vinSuffix)-4:]
 	}
-	_ = r.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "renault", Action: "poll",
-		Input: map[string]any{"vin": vinSuffix},
-		Result: map[string]any{
+	r.events.Info(events.ActionRenaultPoll,
+		map[string]any{"vin": vinSuffix},
+		map[string]any{
 			"soc":            status.Level,
 			"autonomy":       status.Autonomy,
 			"plugStatus":     status.PlugStatus,
 			"chargingStatus": status.ChargingStatus,
 			"totalMileage":   totalMileage,
 		},
-	})
+	)
 
 	return nil
 }
@@ -660,10 +661,9 @@ func (r *Renault) fetchVehicleDetails(vin string) {
 
 		r.markDetailsFetched(time.Now())
 
-		_ = r.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "renault", Action: "vehicleDetails",
-			Result: map[string]any{"model": modelName, "hasImage": imageURL != ""},
-		})
+		r.events.Info(events.ActionVehicleDetails, nil,
+			map[string]any{"model": modelName, "hasImage": imageURL != ""},
+		)
 
 		r.log.Info("vehicle details fetched", "model", modelName, "hasImage", imageURL != "")
 		return

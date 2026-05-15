@@ -10,7 +10,22 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
+
+	"github.com/consi/grosz/internal/events"
 )
+
+// emitOutboundResult records a system event at info on success or warn on
+// failure, for an outbound OCPP request. Keeps the call sites in this file
+// terse — every request function ends with an `events.emitOutboundResult(...)`
+// before returning.
+func (s *Server) emitOutboundResult(action events.Action, input map[string]any, err error) {
+	if err != nil {
+		input["error"] = err.Error()
+		s.events.Warn(action, input, nil)
+		return
+	}
+	s.events.Info(action, input, map[string]any{"status": "Accepted"})
+}
 
 const (
 	requestTimeout = 30 * time.Second
@@ -111,7 +126,11 @@ func (s *Server) GetConfiguration(cpID string, keys []string) (map[string]string
 
 // RemoteStartTransaction sends a RemoteStartTransaction and waits for response.
 // No retry: the myenergi cloud proxy queues commands, so retries cause duplicates.
-func (s *Server) RemoteStartTransaction(cpID, idTag string, connectorID int) error {
+func (s *Server) RemoteStartTransaction(cpID, idTag string, connectorID int) (retErr error) {
+	defer func() {
+		s.emitOutboundResult(events.ActionRemoteStartRequested,
+			map[string]any{"cpID": cpID, "idTag": idTag, "connectorID": connectorID}, retErr)
+	}()
 	rc := make(chan error, 1)
 	err := s.cs.RemoteStartTransaction(cpID, func(conf *core.RemoteStartTransactionConfirmation, err error) {
 		if err != nil {
@@ -142,7 +161,11 @@ func (s *Server) RemoteStartTransaction(cpID, idTag string, connectorID int) err
 
 // RemoteStopTransaction sends a RemoteStopTransaction and waits for response.
 // No retry: the myenergi cloud proxy queues commands, so retries cause duplicates.
-func (s *Server) RemoteStopTransaction(cpID string, transactionID int) error {
+func (s *Server) RemoteStopTransaction(cpID string, transactionID int) (retErr error) {
+	defer func() {
+		s.emitOutboundResult(events.ActionRemoteStopRequested,
+			map[string]any{"cpID": cpID, "txnID": transactionID}, retErr)
+	}()
 	rc := make(chan error, 1)
 	err := s.cs.RemoteStopTransaction(cpID, func(conf *core.RemoteStopTransactionConfirmation, err error) {
 		if err != nil {
@@ -171,7 +194,14 @@ func (s *Server) RemoteStopTransaction(cpID string, transactionID int) error {
 
 // SetChargingProfile sends a SetChargingProfile and waits for response.
 // No retry: the myenergi cloud proxy queues commands, so retries cause duplicates.
-func (s *Server) SetChargingProfile(cpID string, connectorID int, profile *types.ChargingProfile) error {
+func (s *Server) SetChargingProfile(cpID string, connectorID int, profile *types.ChargingProfile) (retErr error) {
+	defer func() {
+		input := map[string]any{"cpID": cpID, "connectorID": connectorID}
+		if profile != nil {
+			input["profileID"] = profile.ChargingProfileId
+		}
+		s.emitOutboundResult(events.ActionChargingProfileApplied, input, retErr)
+	}()
 	rc := make(chan error, 1)
 	err := s.cs.SetChargingProfile(cpID, func(conf *smartcharging.SetChargingProfileConfirmation, err error) {
 		if err != nil {
@@ -200,7 +230,11 @@ func (s *Server) SetChargingProfile(cpID string, connectorID int, profile *types
 
 // ClearChargingProfile sends a ClearChargingProfile and waits for response.
 // No retry: the myenergi cloud proxy queues commands, so retries cause duplicates.
-func (s *Server) ClearChargingProfile(cpID string) error {
+func (s *Server) ClearChargingProfile(cpID string) (retErr error) {
+	defer func() {
+		s.emitOutboundResult(events.ActionChargingProfileCleared,
+			map[string]any{"cpID": cpID}, retErr)
+	}()
 	rc := make(chan error, 1)
 	err := s.cs.ClearChargingProfile(cpID, func(conf *smartcharging.ClearChargingProfileConfirmation, err error) {
 		if err != nil {
@@ -254,7 +288,11 @@ func (s *Server) ChangeAvailability(cpID string, connectorID int, availType core
 
 // Reset sends a Reset request (Hard or Soft) and waits for response.
 // No retry: the myenergi cloud proxy queues commands.
-func (s *Server) Reset(cpID string, resetType core.ResetType) error {
+func (s *Server) Reset(cpID string, resetType core.ResetType) (retErr error) {
+	defer func() {
+		s.emitOutboundResult(events.ActionResetRequested,
+			map[string]any{"cpID": cpID, "type": string(resetType)}, retErr)
+	}()
 	rc := make(chan error, 1)
 	err := s.cs.Reset(cpID, func(conf *core.ResetConfirmation, err error) {
 		if err != nil {
@@ -314,7 +352,13 @@ func (s *Server) ClearCache(cpID string) error {
 // UTC since Zappi requires it. The location URL is required by the OCPP 1.6
 // schema but is ignored by Zappi (firmware always comes from myenergi servers).
 // No retry: the myenergi cloud proxy queues commands.
-func (s *Server) UpdateFirmware(cpID, location string, retrieveDate time.Time) error {
+func (s *Server) UpdateFirmware(cpID, location string, retrieveDate time.Time) (retErr error) {
+	defer func() {
+		s.emitOutboundResult(events.ActionFirmwareUpdateRequested,
+			map[string]any{"cpID": cpID, "location": location, "retrieveDate": retrieveDate.UTC().Format(time.RFC3339)},
+			retErr,
+		)
+	}()
 	rc := make(chan error, 1)
 	utcDate := types.NewDateTime(retrieveDate.UTC())
 	err := s.cs.UpdateFirmware(cpID, func(conf *firmware.UpdateFirmwareConfirmation, err error) {

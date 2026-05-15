@@ -34,6 +34,7 @@ const groups: SettingGroup[] = [
     keys: [
       { key: 'auth.username', labelKey: 'settings.username', type: 'text' },
       { key: 'auth.password', labelKey: 'settings.password', type: 'password' },
+      { key: 'auth.session_lifetime_days', labelKey: 'settings.sessionLifetimeDays', type: 'number' },
     ],
   },
   {

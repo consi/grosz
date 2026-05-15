@@ -176,6 +176,7 @@ const de: Translations = {
   'settings.userManagement': 'Benutzerverwaltung',
   'settings.username': 'Benutzername',
   'settings.password': 'Passwort',
+  'settings.sessionLifetimeDays': 'Sitzungsdauer (Tage)',
   'settings.ocppServer': 'OCPP-Server',
   'settings.authKey': 'Autorisierungsschl\u00fcssel',
   'settings.charger': 'Ladeger\u00e4t',
@@ -225,6 +226,9 @@ const de: Translations = {
   'controls.heading': 'Manuelle Steuerung',
   'controls.start': 'Laden starten',
   'controls.stop': 'Laden stoppen',
+
+  'version.newVersion': 'Eine neue Version wurde bereitgestellt',
+  'version.reload': 'App neu laden',
 };
 
 export default de;

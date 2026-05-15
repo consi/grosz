@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/meter"
 	"github.com/consi/grosz/internal/ocpp"
 	"github.com/consi/grosz/internal/scheduler"
@@ -29,34 +29,49 @@ type Server struct {
 	srv       *http.Server
 	ocpp      *ocpp.Server
 	store     *store.Store
+	auth      *events.Bound
+	web       *events.Bound
 	tariff    tariff.Provider
 	scheduler *scheduler.Scheduler
 	meter     *meter.Poller
 	sse       *SSEBroker
 	log       *slog.Logger
 
-	sessionsMu sync.RWMutex
-	sessions   map[string]bool // active session tokens
+	bootID  string
+	version string
+	commit  string
+
 	challenges *challengeStore
 }
 
 // New creates a new web server.
-func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, log *slog.Logger) *Server {
+func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, bootID, version, commit string, log *slog.Logger) *Server {
+	sseBroker := NewSSEBroker(log)
+	sseBroker.SetBootID(bootID)
+
 	s := &Server{
-		ocpp:      ocppSrv,
-		store:     st,
-		tariff:    tp,
-		scheduler: sched,
-		meter:     mp,
-		sse:       NewSSEBroker(log),
-		log:       log.With("component", "web"),
-		sessions:   make(map[string]bool),
+		ocpp:       ocppSrv,
+		store:      st,
+		auth:       events.For(events.SourceAuth, st),
+		web:        events.For(events.SourceWeb, st),
+		tariff:     tp,
+		scheduler:  sched,
+		meter:      mp,
+		sse:        sseBroker,
+		log:        log.With("component", "web"),
+		bootID:     bootID,
+		version:    version,
+		commit:     commit,
 		challenges: newChallengeStore(),
 	}
 
 	s.migratePasswordHash()
+	s.purgeExpiredSessions()
 
 	mux := http.NewServeMux()
+
+	// Version/boot identity (unprotected)
+	mux.HandleFunc("GET /api/version", s.handleVersion)
 
 	// Auth routes (unprotected)
 	mux.HandleFunc("POST /api/login", s.handleLogin)
@@ -194,6 +209,8 @@ func (s *Server) buildStatus() any {
 		Overrides             []store.ScheduleOverride  `json:"overrides"`
 		Charging              bool                      `json:"charging"`
 		Mode                  string                    `json:"mode"`
+		PendingMode           string                    `json:"pendingMode,omitempty"`
+		PendingModeApplyAt    string                    `json:"pendingModeApplyAt,omitempty"`
 		SoC                   float64                   `json:"soc"`
 		MinSoC                float64                   `json:"minSoc"`
 		SkipAboveSoC          float64                   `json:"skipAboveSoc"`
@@ -270,12 +287,22 @@ func (s *Server) buildStatus() any {
 		mileage = odo.Mileage
 	}
 
+	var pendingMode, pendingModeApplyAt string
+	if s.scheduler != nil {
+		if pm, applyAt := s.scheduler.PendingModeChange(); pm != "" {
+			pendingMode = pm
+			pendingModeApplyAt = applyAt.Format(time.RFC3339)
+		}
+	}
+
 	return statusResponse{
 		ChargePoints:          result,
 		Schedule:              sched,
 		Overrides:             overrides,
 		Charging:              scheduler.IsChargeTime(sched),
 		Mode:                  s.store.GetDefault("charger.mode", "schedule"),
+		PendingMode:           pendingMode,
+		PendingModeApplyAt:    pendingModeApplyAt,
 		SoC:                   s.store.GetFloat("scheduler.current_soc", 0),
 		MinSoC:                s.store.GetFloat("scheduler.min_soc", 0),
 		SkipAboveSoC:          s.store.GetFloat("scheduler.skip_above_soc", 0),
@@ -328,34 +355,66 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	passHash := s.store.GetDefault("auth.password", "")
 
 	if req.Username != user || passHash == "" || !checkPassword(passHash, req.Password) {
+		s.auth.Warn(events.ActionLogin,
+			map[string]any{"username": req.Username, "method": "password"},
+			map[string]any{"error": "invalid credentials"},
+		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid credentials"})
 		return
 	}
 
-	token := generateToken()
-	s.sessionsMu.Lock()
-	s.sessions[token] = true
-	s.sessionsMu.Unlock()
+	token, expiresAt, err := s.createSession(user, r.UserAgent())
+	if err != nil {
+		s.log.Error("failed to create session", "err", err)
+		s.auth.Error(events.ActionLogin,
+			map[string]any{"username": user, "method": "password"},
+			err,
+		)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.setSessionCookie(w, token)
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	s.auth.Info(events.ActionLogin,
+		map[string]any{"username": user, "method": "password", "userAgent": r.UserAgent()},
+		map[string]any{"expiresAt": expiresAt.Format(time.RFC3339)},
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
+// setSessionCookie writes a session cookie whose MaxAge matches the configured lifetime,
+// so the browser persists it across restarts. Secure is required for iOS Safari to
+// retain the cookie across app restarts when the site is served via HTTPS proxy.
+func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(s.sessionLifetime().Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"bootId":  s.bootID,
+		"version": s.version,
+		"commit":  s.commit,
+	})
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("session"); err == nil {
-		s.sessionsMu.Lock()
-		delete(s.sessions, c.Value)
-		s.sessionsMu.Unlock()
+		_ = s.deleteSession(c.Value)
+		s.auth.Info(events.ActionLogout, nil, map[string]any{"ok": true})
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -372,7 +431,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	hasPasskeys, _ := s.store.HasCredentials()
-	authed := s.isAuthenticated(r)
+	authed, reason := s.checkAuth(r)
+	if !authed {
+		s.log.Info("auth check failed", "reason", reason, "ua", r.UserAgent(), "remote", r.RemoteAddr)
+	}
 	resp := map[string]any{
 		"authenticated": authed,
 		"passkeys":      hasPasskeys,
@@ -384,14 +446,22 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) isAuthenticated(r *http.Request) bool {
+// checkAuth returns (ok, reason). The reason is only set on failure and
+// distinguishes "no cookie" from "cookie present but unknown/expired".
+func (s *Server) checkAuth(r *http.Request) (bool, string) {
 	c, err := r.Cookie("session")
 	if err != nil {
-		return false
+		return false, "no-cookie"
 	}
-	s.sessionsMu.RLock()
-	defer s.sessionsMu.RUnlock()
-	return s.sessions[c.Value]
+	if _, ok := s.lookupSession(c.Value); !ok {
+		return false, "lookup-miss"
+	}
+	return true, ""
+}
+
+func (s *Server) isAuthenticated(r *http.Request) bool {
+	ok, _ := s.checkAuth(r)
+	return ok
 }
 
 func (s *Server) requireAuth(handler http.HandlerFunc) http.HandlerFunc {

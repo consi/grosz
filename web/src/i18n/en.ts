@@ -205,6 +205,7 @@ const en = {
   'settings.userManagement': 'User Management',
   'settings.username': 'Username',
   'settings.password': 'Password',
+  'settings.sessionLifetimeDays': 'Session Lifetime (days)',
   'settings.ocppServer': 'OCPP Server',
   'settings.authKey': 'Authorisation Key',
   'settings.charger': 'Charger',
@@ -255,6 +256,10 @@ const en = {
   'controls.heading': 'Manual Control',
   'controls.start': 'Start Charging',
   'controls.stop': 'Stop Charging',
+
+  // Version update banner
+  'version.newVersion': 'A new version was deployed',
+  'version.reload': 'Reload app',
 } as const;
 
 export default en;

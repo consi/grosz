@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/ocpp"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
@@ -126,6 +127,7 @@ type Scheduler struct {
 	charger Charger
 	tariff  tariff.Provider
 	store   *store.Store
+	events  *events.Bound
 	log     *slog.Logger
 
 	mu            sync.RWMutex
@@ -142,6 +144,15 @@ type Scheduler struct {
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
 
+	// User-driven mode changes are debounced 5s server-side so a rapid
+	// Schedule → Off → Schedule misclick doesn't churn the charger. Only
+	// the last requested mode applies. pendingMode is in-memory only — a
+	// restart drops any in-flight pending change.
+	modeDebounceMu    sync.Mutex
+	modeDebounceTimer *time.Timer
+	pendingMode       string
+	pendingModeAt     time.Time
+
 	// Cooldown tracking for cloud-proxied chargers (e.g. Zappi via myenergi cloud).
 	// Commands are relayed slowly; duplicates queue up and cause issues.
 	lastStartSent   time.Time
@@ -153,6 +164,12 @@ type Scheduler struct {
 	// whose End falls between lastRecomputeAt and now are candidates for
 	// missed-period detection (no overlapping charging session).
 	lastRecomputeAt time.Time
+
+	// txnID for which recompute is currently frozen. Non-zero means the
+	// last recompute returned early because a transaction was active. Used
+	// to emit the "frozen" system event only once per session instead of
+	// every 15-minute tick.
+	recomputeFrozenTxnID int
 
 	onRecompute func() // optional callback fired after every recompute
 }
@@ -188,6 +205,7 @@ func New(charger Charger, tp tariff.Provider, st *store.Store, log *slog.Logger)
 		charger:  charger,
 		tariff:   tp,
 		store:    st,
+		events:   events.For(events.SourceScheduler, st),
 		log:      log.With("component", "scheduler"),
 		notifyCh: make(chan struct{}, 1),
 		cancel:   cancel,
@@ -210,10 +228,7 @@ func (s *Scheduler) loadPersistedSchedule() {
 	var sched Schedule
 	if err := json.Unmarshal([]byte(raw), &sched); err != nil {
 		s.log.Warn("failed to decode persisted schedule, ignoring", "err", err)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule", Level: "warn",
-			Result: map[string]any{"error": err.Error()},
-		})
+		s.events.Error(events.ActionLoadSchedule, nil, err)
 		return
 	}
 
@@ -239,10 +254,9 @@ func (s *Scheduler) loadPersistedSchedule() {
 
 	if len(sched.Slots) == 0 {
 		s.log.Info("persisted schedule had no live slots, starting fresh", "droppedPastSlots", dropped)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule",
-			Result: map[string]any{"restored": false, "droppedPastSlots": dropped},
-		})
+		s.events.Info(events.ActionLoadSchedule, nil,
+			map[string]any{"restored": false, "droppedPastSlots": dropped},
+		)
 		return
 	}
 
@@ -261,15 +275,14 @@ func (s *Scheduler) loadPersistedSchedule() {
 		"activePeriods", activePeriods,
 		"droppedPastSlots", dropped,
 	)
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "loadSchedule",
-		Result: map[string]any{
+	s.events.Info(events.ActionLoadSchedule, nil,
+		map[string]any{
 			"restored":         true,
 			"slots":            len(sched.Slots),
 			"activePeriods":    activePeriods,
 			"droppedPastSlots": dropped,
 		},
-	})
+	)
 }
 
 // saveCurrent persists s.current (or empty string if nil) to the settings
@@ -291,18 +304,12 @@ func (s *Scheduler) saveCurrent() {
 	data, err := json.Marshal(cur)
 	if err != nil {
 		s.log.Warn("failed to encode schedule for persistence", "err", err)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "saveSchedule", Level: "warn",
-			Result: map[string]any{"error": err.Error()},
-		})
+		s.events.Error(events.ActionSaveSchedule, nil, err)
 		return
 	}
 	if err := s.store.Set(persistedScheduleKey, string(data)); err != nil {
 		s.log.Warn("failed to persist schedule", "err", err)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "saveSchedule", Level: "warn",
-			Result: map[string]any{"error": err.Error()},
-		})
+		s.events.Error(events.ActionSaveSchedule, nil, err)
 	}
 }
 
@@ -355,11 +362,8 @@ func (s *Scheduler) SetConfig(cfg Config) {
 	s.mu.Lock()
 	s.config = &cfg
 	s.mu.Unlock()
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "setConfig",
-		Input: map[string]any{
+	s.events.Info(events.ActionSetConfig,
+		map[string]any{
 			"targetEnergy": cfg.TargetEnergy,
 			"deadline":     cfg.Deadline.Format(time.RFC3339),
 			"maxPower":     cfg.MaxPower,
@@ -367,8 +371,8 @@ func (s *Scheduler) SetConfig(cfg Config) {
 			"currentSoC":   cfg.CurrentSoC,
 			"maxPrice":     cfg.MaxPrice,
 		},
-		Result: map[string]any{"applied": true},
-	})
+		map[string]any{"applied": true},
+	)
 	s.recompute()
 }
 
@@ -379,12 +383,9 @@ func (s *Scheduler) ReloadConfig() {
 	s.mu.Lock()
 	s.config = nil
 	s.mu.Unlock()
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "reloadConfig",
-		Result:    map[string]any{"invalidated": true},
-	})
+	s.events.Info(events.ActionReloadConfig, nil,
+		map[string]any{"invalidated": true},
+	)
 	s.NotifyImmediate()
 }
 
@@ -412,13 +413,10 @@ func (s *Scheduler) ClearSchedule() {
 		}
 	}
 	s.log.Info("schedule cleared", "clearedProfile", clearedProfile)
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "clearSchedule",
-		Input:     map[string]any{"cpID": cpID},
-		Result:    map[string]any{"cleared": true, "clearedProfile": clearedProfile},
-	})
+	s.events.Info(events.ActionClearSchedule,
+		map[string]any{"cpID": cpID},
+		map[string]any{"cleared": true, "clearedProfile": clearedProfile},
+	)
 	s.saveCurrent()
 }
 
@@ -442,13 +440,10 @@ func (s *Scheduler) CancelSlot(date string) bool {
 	}
 	s.mu.Unlock()
 
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "cancelSlot",
-		Input:     map[string]any{"date": date},
-		Result:    map[string]any{"found": found},
-	})
+	s.events.Info(events.ActionCancelSlot,
+		map[string]any{"date": date},
+		map[string]any{"found": found},
+	)
 	if found {
 		s.saveCurrent()
 		// If we were charging in this slot's period, stop
@@ -477,13 +472,10 @@ func (s *Scheduler) RestoreSlot(date string) bool {
 	}
 	s.mu.Unlock()
 
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "restoreSlot",
-		Input:     map[string]any{"date": date},
-		Result:    map[string]any{"found": found},
-	})
+	s.events.Info(events.ActionRestoreSlot,
+		map[string]any{"date": date},
+		map[string]any{"found": found},
+	)
 	if found {
 		s.saveCurrent()
 		// If we're now in this slot's period, start charging
@@ -553,11 +545,7 @@ func (s *Scheduler) preserveActiveSlot(slot *ScheduleSlot, wouldSkipKey string, 
 		"slotDate":            slot.Date,
 		"wouldSkip":           wouldSkipKey,
 	}
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "recompute",
-		Input:  input,
-		Result: result,
-	})
+	s.events.Info(events.ActionRecompute, input, result)
 
 	// Re-applying the same profile is a no-op via hash dedup but keeps the
 	// charger's profile state consistent if the previous apply was lost.
@@ -618,19 +606,15 @@ func (s *Scheduler) detectMissedPeriods(prev *Schedule) {
 
 		s.log.Warn("scheduled charging period missed (no session overlap)",
 			"start", p.Start, "end", p.End, "plannedKWh", plannedKWh, "source", p.Source)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(),
-			Source:    "scheduler",
-			Action:    "missed_period",
-			Level:     "warn",
-			Input: map[string]any{
+		s.events.Warn(events.ActionMissedPeriod,
+			map[string]any{
 				"start":      p.Start.Format(time.RFC3339),
 				"end":        p.End.Format(time.RFC3339),
 				"plannedKWh": plannedKWh,
 				"source":     p.Source,
 			},
-			Result: map[string]any{"reason": "no_overlapping_session"},
-		})
+			map[string]any{"reason": "no_overlapping_session"},
+		)
 	}
 }
 
@@ -777,6 +761,81 @@ func (s *Scheduler) NotifyImmediate() {
 	}
 }
 
+// modeChangeDebounce is the window that absorbs UI mode-button misclicks
+// (e.g., Schedule → Off → Schedule fired in under a second). Only the last
+// requested mode in this window is applied. UI pulses the chosen button
+// once per second for the duration so the user sees the countdown.
+const modeChangeDebounce = 3 * time.Second
+
+// RequestModeChange registers a user-driven mode change to be applied after
+// modeChangeDebounce of silence. Subsequent calls within the window replace
+// the pending mode and reset the timer.
+//
+// Callers MUST NOT also call store.Set("charger.mode", ...) or OnModeChanged
+// directly — that path is the synchronous internal one. RequestModeChange
+// is the UI-facing entry point and owns both the store update and the
+// OnModeChanged invocation (in applyPendingMode).
+func (s *Scheduler) RequestModeChange(newMode string) {
+	s.modeDebounceMu.Lock()
+	current := s.store.GetDefault("charger.mode", "schedule")
+	s.pendingMode = newMode
+	s.pendingModeAt = time.Now().Add(modeChangeDebounce)
+	if s.modeDebounceTimer != nil {
+		s.modeDebounceTimer.Stop()
+	}
+	s.modeDebounceTimer = time.AfterFunc(modeChangeDebounce, s.applyPendingMode)
+	applyAt := s.pendingModeAt
+	s.modeDebounceMu.Unlock()
+
+	s.events.Info(events.ActionModeChangeRequested,
+		map[string]any{"requested": newMode, "current": current},
+		map[string]any{"applyAt": applyAt.Format(time.RFC3339), "debounceSeconds": int(modeChangeDebounce / time.Second)},
+	)
+
+	// Push the pending state out to any SSE listener so the UI's pulse
+	// indicator picks up the timer immediately (without waiting for a
+	// status poll). MUST be called outside modeDebounceMu — the broadcast
+	// path calls PendingModeChange which re-acquires this mutex.
+	s.fireOnRecompute()
+}
+
+// PendingModeChange returns the pending mode and apply timestamp, or
+// ("", time.Time{}) when nothing is pending.
+func (s *Scheduler) PendingModeChange() (string, time.Time) {
+	s.modeDebounceMu.Lock()
+	defer s.modeDebounceMu.Unlock()
+	return s.pendingMode, s.pendingModeAt
+}
+
+// applyPendingMode is the timer callback fired modeChangeDebounce after the
+// last RequestModeChange. Persists the new mode, clears any auto schedule
+// when transitioning to off/force, and calls OnModeChanged.
+func (s *Scheduler) applyPendingMode() {
+	s.modeDebounceMu.Lock()
+	pending := s.pendingMode
+	s.pendingMode = ""
+	s.pendingModeAt = time.Time{}
+	s.modeDebounceMu.Unlock()
+
+	if pending == "" {
+		return
+	}
+
+	oldMode := s.store.GetDefault("charger.mode", "schedule")
+	_ = s.store.Set("charger.mode", pending)
+	if pending == "off" || pending == "force" {
+		s.ClearSchedule()
+	}
+	s.OnModeChanged(oldMode, pending)
+
+	// SSE push of the cleared pending state. OnModeChanged → NotifyImmediate
+	// only triggers fireOnRecompute via the loop's recompute, which is
+	// skipped for non-schedule modes — so without this call, the frontend
+	// would never learn the pending change has applied and the pulse
+	// indicator would never stop.
+	s.fireOnRecompute()
+}
+
 // OnModeChanged is the synchronous user-driven mode-change entry point.
 // Compared to a plain Notify():
 //   - clears the start/stop cooldowns so a user click is never silently
@@ -795,11 +854,10 @@ func (s *Scheduler) OnModeChanged(oldMode, newMode string) {
 	s.lastStopSent = time.Time{}
 	s.mu.Unlock()
 
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "modeChange",
-		Input:  map[string]any{"old": oldMode, "new": newMode},
-		Result: map[string]any{"clearedCooldowns": true},
-	})
+	s.events.Info(events.ActionModeChange,
+		map[string]any{"old": oldMode, "new": newMode},
+		map[string]any{"clearedCooldowns": true},
+	)
 
 	s.controlChargingInternal(newMode, true)
 	s.NotifyImmediate()
@@ -833,13 +891,10 @@ func (s *Scheduler) UpdateSoC(energyKWh float64) {
 		"oldSoC", currentSoC,
 		"newSoC", newSoC,
 	)
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "scheduler",
-		Action:    "updateSoC",
-		Input:     map[string]any{"energyKWh": energyKWh, "capacity": capacity},
-		Result:    map[string]any{"oldSoC": currentSoC, "newSoC": newSoC},
-	})
+	s.events.Info(events.ActionUpdateSoC,
+		map[string]any{"energyKWh": energyKWh, "capacity": capacity},
+		map[string]any{"oldSoC": currentSoC, "newSoC": newSoC},
+	)
 }
 
 func (s *Scheduler) loop(ctx context.Context) {
@@ -933,11 +988,10 @@ func (s *Scheduler) recordPlugCheckSkip(reason, mode, cpID string) {
 	if !s.lastStartSent.IsZero() && time.Since(s.lastStartSent) < remoteCmdCooldown {
 		return
 	}
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging", Level: "info",
-		Input:  map[string]any{"mode": mode, "cpID": cpID, "plugStatus": "0"},
-		Result: map[string]any{"plugCheckSkipped": reason, "action": "start"},
-	})
+	s.events.Info(events.ActionControlCharging,
+		map[string]any{"mode": mode, "cpID": cpID, "plugStatus": "0"},
+		map[string]any{"plugCheckSkipped": reason, "action": "start"},
+	)
 }
 
 // remoteCmdCooldown is the minimum interval between sending the same type of
@@ -1009,11 +1063,10 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 			blocked, skipReason := s.isVehiclePlugBlocked()
 			if blocked {
 				s.log.Warn("charge blocked by vehicle plug check", "cpID", cpID, "mode", "force")
-				_ = s.store.RecordSystemEvent(store.SystemEvent{
-					Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging", Level: "warn",
-					Input:  map[string]any{"mode": "force", "cpID": cpID},
-					Result: map[string]any{"blocked": "vehicle_plug_check", "plugStatus": "0"},
-				})
+				s.events.Warn(events.ActionControlCharging,
+					map[string]any{"mode": "force", "cpID": cpID},
+					map[string]any{"blocked": "vehicle_plug_check", "plugStatus": "0"},
+				)
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "force", cpID)
@@ -1033,11 +1086,10 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 			blocked, skipReason := s.isVehiclePlugBlocked()
 			if blocked {
 				s.log.Warn("charge blocked by vehicle plug check", "cpID", cpID, "mode", "schedule")
-				_ = s.store.RecordSystemEvent(store.SystemEvent{
-					Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging", Level: "warn",
-					Input:  map[string]any{"mode": "schedule", "cpID": cpID, "shouldCharge": true},
-					Result: map[string]any{"blocked": "vehicle_plug_check", "plugStatus": "0"},
-				})
+				s.events.Warn(events.ActionControlCharging,
+					map[string]any{"mode": "schedule", "cpID": cpID, "shouldCharge": true},
+					map[string]any{"blocked": "vehicle_plug_check", "plugStatus": "0"},
+				)
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "schedule", cpID)
@@ -1067,12 +1119,10 @@ func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool)
 	if suspendedEVOverride {
 		result["suspendedEVOverride"] = true
 	}
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging",
-		Level:  levelFromErr(err),
-		Input:  map[string]any{"mode": mode, "cpID": cpID},
-		Result: result,
-	})
+	emitControlCharging(s, err,
+		map[string]any{"mode": mode, "cpID": cpID},
+		result,
+	)
 }
 
 func (s *Scheduler) sendStop(cpID string, txnID int, mode string) {
@@ -1090,15 +1140,52 @@ func (s *Scheduler) sendStop(cpID string, txnID int, mode string) {
 	// "stop" chart marker is emitted by the OCPP handler when the resulting
 	// StopTransaction arrives, so the timestamp matches the actual stop time
 	// (and we don't double-mark when the EV stops on its own).
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "controlCharging",
-		Level:  levelFromErr(err),
-		Input:  map[string]any{"mode": mode, "cpID": cpID, "txnID": txnID},
-		Result: resultFromErr(err, "stop"),
-	})
+	emitControlCharging(s, err,
+		map[string]any{"mode": mode, "cpID": cpID, "txnID": txnID},
+		resultFromErr(err, "stop"),
+	)
+}
+
+// emitControlCharging chooses Info or Warn for the controlCharging action
+// based on whether the underlying RemoteStart/Stop call returned an error.
+func emitControlCharging(s *Scheduler, err error, input, result map[string]any) {
+	if err != nil {
+		s.events.Warn(events.ActionControlCharging, input, result)
+		return
+	}
+	s.events.Info(events.ActionControlCharging, input, result)
 }
 
 func (s *Scheduler) recompute() {
+	// While a charging transaction is open at the charger, freeze recompute
+	// entirely. The pre-charge schedule runs to completion as-planned —
+	// SoC-skip, tariff refreshes, MaxPrice changes, and target-reached
+	// transitions are all queued until the transaction ends. Without this
+	// freeze, a mid-charge SoC rise across the skip threshold (or a
+	// cheaper-rate refresh) can drop the planned future periods of the
+	// active slot, ending the charge well short of TargetSoC at the next
+	// hour boundary.
+	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	if cpID != "" {
+		if _, txnID, connected := s.charger.ConnectorStatus(cpID, 1); connected && txnID > 0 {
+			s.mu.Lock()
+			alreadyFrozen := s.recomputeFrozenTxnID == txnID
+			s.recomputeFrozenTxnID = txnID
+			s.mu.Unlock()
+			if !alreadyFrozen {
+				s.log.Info("recompute frozen — transaction active", "cpID", cpID, "txnID", txnID)
+				s.events.Info(events.ActionRecompute,
+					map[string]any{"cpID": cpID, "txnID": txnID},
+					map[string]any{"frozen": true, "reason": "transaction_active"},
+				)
+			}
+			return
+		}
+	}
+	s.mu.Lock()
+	s.recomputeFrozenTxnID = 0
+	s.mu.Unlock()
+
 	s.mu.RLock()
 	cfg := s.config
 	power := s.livePower
@@ -1242,11 +1329,10 @@ func (s *Scheduler) recompute() {
 		s.skipReasonKey = skipKey
 		s.skipParams = skipParams
 		s.mu.Unlock()
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "recompute",
-			Input:  map[string]any{"targetEnergy": fresh.TargetEnergy, "maxPrice": cfg.MaxPrice, "ratesCount": len(rates), "currentSoC": cfg.CurrentSoC, "forces": len(forcePeriods)},
-			Result: map[string]any{"skipped": true, "reason": skipReason},
-		})
+		s.events.Info(events.ActionRecompute,
+			map[string]any{"targetEnergy": fresh.TargetEnergy, "maxPrice": cfg.MaxPrice, "ratesCount": len(rates), "currentSoC": cfg.CurrentSoC, "forces": len(forcePeriods)},
+			map[string]any{"skipped": true, "reason": skipReason},
+		)
 		s.saveCurrent()
 		s.fireOnRecompute()
 		return
@@ -1321,15 +1407,14 @@ func (s *Scheduler) recompute() {
 	if inProgress != nil {
 		result["mergedActiveSlot"] = inProgress.Date
 	}
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "recompute",
-		Input: map[string]any{
+	s.events.Info(events.ActionRecompute,
+		map[string]any{
 			"targetEnergy": fresh.TargetEnergy, "maxPower": chargePower,
 			"ratesCount": len(rates), "currentSoC": cfg.CurrentSoC,
 			"forces": len(forcePeriods),
 		},
-		Result: result,
-	})
+		result,
+	)
 
 	s.applyProfile(sched)
 	s.saveCurrent()
@@ -1404,11 +1489,10 @@ func (s *Scheduler) applyProfile(sched *Schedule) {
 
 	if err := s.charger.SetChargingProfile(cpID, 1, profile); err != nil {
 		s.log.Warn("failed to set charging profile", "err", err)
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "applyProfile", Level: "warn",
-			Input:  map[string]any{"cpID": cpID},
-			Result: map[string]any{"error": err.Error()},
-		})
+		s.events.Error(events.ActionApplyProfile,
+			map[string]any{"cpID": cpID},
+			err,
+		)
 		return
 	}
 
@@ -1418,11 +1502,10 @@ func (s *Scheduler) applyProfile(sched *Schedule) {
 	s.mu.Unlock()
 
 	s.log.Info("charging profile applied", "hash", hash)
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "applyProfile",
-		Input:  map[string]any{"cpID": cpID, "periods": len(sched.ActivePeriods())},
-		Result: map[string]any{"applied": true, "hash": hash},
-	})
+	s.events.Info(events.ActionApplyProfile,
+		map[string]any{"cpID": cpID, "periods": len(sched.ActivePeriods())},
+		map[string]any{"applied": true, "hash": hash},
+	)
 }
 
 // ComputeSchedule finds the cheapest hours for each day's window,
@@ -1566,13 +1649,6 @@ func computeSlot(rates []tariff.Rate, targetEnergy, chargePowerW, chargeHeadroom
 		Cost:     math.Round(totalCost*100) / 100,
 		Energy:   math.Round(totalEnergy*100) / 100,
 	}
-}
-
-func levelFromErr(err error) string {
-	if err != nil {
-		return "warn"
-	}
-	return "info"
 }
 
 func resultFromErr(err error, action string) map[string]any {

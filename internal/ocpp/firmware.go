@@ -1,11 +1,11 @@
 package ocpp
 
 import (
-	"time"
+	"fmt"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/firmware"
 
-	"github.com/consi/grosz/internal/store"
+	"github.com/consi/grosz/internal/events"
 )
 
 // OnFirmwareStatusNotification logs charge-point firmware update progress.
@@ -18,19 +18,15 @@ func (s *Server) OnFirmwareStatusNotification(chargePointId string, request *fir
 	s.recordEvent("recv", chargePointId, "FirmwareStatusNotification", request)
 
 	if s.store != nil {
-		level := "info"
+		input := map[string]any{"cpID": chargePointId}
+		result := map[string]any{"status": string(request.Status)}
 		switch request.Status {
 		case firmware.FirmwareStatusDownloadFailed, firmware.FirmwareStatusInstallationFailed:
-			level = "error"
+			s.events.Error(events.ActionFirmwareStatus, input, fmt.Errorf("status=%s", request.Status))
+			_ = result
+		default:
+			s.events.Info(events.ActionFirmwareStatus, input, result)
 		}
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(),
-			Source:    "ocpp",
-			Action:    "firmwareStatus",
-			Level:     level,
-			Input:     map[string]any{"cpID": chargePointId},
-			Result:    map[string]any{"status": string(request.Status)},
-		})
 	}
 
 	return firmware.NewFirmwareStatusNotificationConfirmation(), nil
@@ -44,14 +40,10 @@ func (s *Server) OnDiagnosticsStatusNotification(chargePointId string, request *
 	s.recordEvent("recv", chargePointId, "DiagnosticsStatusNotification", request)
 
 	if s.store != nil {
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(),
-			Source:    "ocpp",
-			Action:    "diagnosticsStatus",
-			Level:     "info",
-			Input:     map[string]any{"cpID": chargePointId},
-			Result:    map[string]any{"status": string(request.Status)},
-		})
+		s.events.Info(events.ActionDiagnosticsStatus,
+			map[string]any{"cpID": chargePointId},
+			map[string]any{"status": string(request.Status)},
+		)
 	}
 
 	return firmware.NewDiagnosticsStatusNotificationConfirmation(), nil

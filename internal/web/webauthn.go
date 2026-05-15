@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // webauthnUser implements webauthn.User for the single admin user.
@@ -217,6 +219,10 @@ func (s *Server) handleWebAuthnRegisterComplete(w http.ResponseWriter, r *http.R
 	}
 
 	s.log.Info("webauthn credential registered", "name", name)
+	s.auth.Info(events.ActionCredentialRegistered,
+		map[string]any{"name": name, "userAgent": r.UserAgent()},
+		nil,
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -296,20 +302,24 @@ func (s *Server) handleWebAuthnLoginComplete(w http.ResponseWriter, r *http.Requ
 	_ = s.store.UpdateCredentialCounter(credID, cred.Authenticator.SignCount)
 
 	// Create session (same mechanism as password login)
-	token := generateToken()
-	s.sessionsMu.Lock()
-	s.sessions[token] = true
-	s.sessionsMu.Unlock()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	username := s.store.GetDefault("auth.username", "admin")
+	token, expiresAt, err := s.createSession(username, r.UserAgent())
+	if err != nil {
+		s.log.Error("failed to create webauthn session", "err", err)
+		s.auth.Error(events.ActionLogin,
+			map[string]any{"username": username, "method": "webauthn"},
+			err,
+		)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.setSessionCookie(w, token)
 
 	s.log.Info("webauthn login successful")
+	s.auth.Info(events.ActionLogin,
+		map[string]any{"username": username, "method": "webauthn", "userAgent": r.UserAgent()},
+		map[string]any{"expiresAt": expiresAt.Format(time.RFC3339)},
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -356,6 +366,10 @@ func (s *Server) handleWebAuthnDeleteCredential(w http.ResponseWriter, r *http.R
 	}
 
 	s.log.Info("webauthn credential deleted", "id", id)
+	s.auth.Info(events.ActionCredentialDeleted,
+		map[string]any{"id": id},
+		nil,
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})

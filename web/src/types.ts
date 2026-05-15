@@ -61,6 +61,8 @@ export interface StatusResponse {
   overrides?: ScheduleOverride[];
   charging: boolean;
   mode: 'off' | 'schedule' | 'force';
+  pendingMode?: 'off' | 'schedule' | 'force';
+  pendingModeApplyAt?: string;
   soc: number;
   minSoc: number;
   skipAboveSoc: number;

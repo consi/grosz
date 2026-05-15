@@ -189,6 +189,16 @@ func (s *Store) migrate() error {
 			CHECK(end_time > start_time)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_overrides_window ON schedule_overrides(start_time, end_time)`,
+
+		`CREATE TABLE IF NOT EXISTS web_sessions (
+			token      TEXT PRIMARY KEY,
+			username   TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			expires_at TEXT NOT NULL,
+			last_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+			user_agent TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at)`,
 	}
 
 	for _, m := range migrations {

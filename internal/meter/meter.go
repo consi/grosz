@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -54,6 +55,7 @@ type LiveState struct {
 // Poller periodically reads a Pstryk meter and stores readings.
 type Poller struct {
 	store  *store.Store
+	events *events.Bound
 	log    *slog.Logger
 	client *http.Client
 
@@ -78,6 +80,7 @@ func New(st *store.Store, log *slog.Logger) *Poller {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Poller{
 		store:  st,
+		events: events.For(events.SourceMeter, st),
 		log:    log.With("component", "meter"),
 		client: &http.Client{Timeout: 5 * time.Second},
 		cancel: cancel,
@@ -149,11 +152,10 @@ func (p *Poller) adjustEnergy(rawWh float64) float64 {
 			"previous_effective_wh", prev,
 			"new_offset_wh", p.energyOffset,
 		)
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "meter", Action: "reset_detected", Level: "warn",
-			Input:  map[string]any{"raw_wh": rawWh, "previous_effective_wh": prev},
-			Result: map[string]any{"new_offset_wh": p.energyOffset},
-		})
+		p.events.Warn(events.ActionMeterResetDetected,
+			map[string]any{"rawWh": rawWh, "previousEffectiveWh": prev},
+			map[string]any{"newOffsetWh": p.energyOffset},
+		)
 	} else if effective < p.lastEffective {
 		// Small decrease (within threshold) — clamp to keep the series monotonic.
 		effective = p.lastEffective
@@ -194,20 +196,16 @@ func (p *Poller) poll(baseURL string) {
 	resp, err := p.client.Get(baseURL + "/state")
 	if err != nil {
 		p.log.Debug("meter fetch failed", "err", err)
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "meter", Action: "poll", Level: "warn",
-			Result: map[string]any{"error": err.Error()},
-		})
+		p.events.Error(events.ActionMeterPoll, nil, err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		p.log.Debug("meter bad status", "status", resp.StatusCode)
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "meter", Action: "poll", Level: "warn",
-			Result: map[string]any{"error": fmt.Sprintf("bad status %d", resp.StatusCode)},
-		})
+		p.events.Warn(events.ActionMeterPoll, nil,
+			map[string]any{"error": fmt.Sprintf("bad status %d", resp.StatusCode)},
+		)
 		return
 	}
 
@@ -305,10 +303,9 @@ func (p *Poller) poll(baseURL string) {
 		sinceLastSyslog := time.Since(p.lastSyslog)
 		p.mu.RUnlock()
 		if sinceLastSyslog >= time.Minute {
-			_ = p.store.RecordSystemEvent(store.SystemEvent{
-				Timestamp: time.Now(), Source: "meter", Action: "poll",
-				Result: map[string]any{"powerW": powerW, "energyWh": energyWh},
-			})
+			p.events.Info(events.ActionMeterPoll, nil,
+				map[string]any{"powerW": powerW, "energyWh": energyWh},
+			)
 			p.mu.Lock()
 			p.lastSyslog = time.Now()
 			p.mu.Unlock()

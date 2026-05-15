@@ -176,6 +176,7 @@ const lv: Translations = {
   'settings.userManagement': 'Lietot\u0101ju p\u0101rvald\u012bba',
   'settings.username': 'Lietot\u0101jv\u0101rds',
   'settings.password': 'Parole',
+  'settings.sessionLifetimeDays': 'Sesijas ilgums (dienas)',
   'settings.ocppServer': 'OCPP serveris',
   'settings.authKey': 'Autoriz\u0101cijas atsl\u0113ga',
   'settings.charger': 'L\u0101d\u0113t\u0101js',
@@ -225,6 +226,9 @@ const lv: Translations = {
   'controls.heading': 'Manu\u0101l\u0101 vad\u012bba',
   'controls.start': 'S\u0101kt l\u0101d\u0113\u0161anu',
   'controls.stop': 'Aptur\u0113t l\u0101d\u0113\u0161anu',
+
+  'version.newVersion': 'Tika izvietota jauna versija',
+  'version.reload': 'P\u0101rl\u0101d\u0113t lietotni',
 };
 
 export default lv;

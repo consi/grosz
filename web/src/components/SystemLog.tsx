@@ -12,7 +12,6 @@ interface SystemEvent {
 }
 
 const PAGE_SIZE = 100;
-const SOURCES = ['scheduler', 'tariff', 'renault', 'meter', 'zappi', 'ocpp'];
 
 export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timezone: string }) {
   const { t, locale } = useTranslation();
@@ -22,6 +21,10 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
   const [filter, setFilter] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  // Sources are derived from the backend (DISTINCT source from system_events).
+  // Cached in state so the dropdown doesn't shrink while a filter is applied
+  // (filtered queries return only that source's events) — only grow it.
+  const [sources, setSources] = useState<string[]>([]);
 
   const fetchPage = useCallback(async (p: number, source: string) => {
     setLoading(true);
@@ -33,6 +36,17 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
       const data = await resp.json();
       setEvents(data.events || []);
       setTotal(data.total || 0);
+      // Backend returns the DISTINCT source list across all events (not just
+      // the current page). Merge into state so any source ever observed stays
+      // in the dropdown — handles the case where filtered queries scope the
+      // sources list to one entry.
+      const incoming: string[] = Array.isArray(data.sources) ? data.sources : [];
+      if (incoming.length > 0) {
+        setSources((prev) => {
+          const merged = new Set([...prev, ...incoming]);
+          return Array.from(merged).sort();
+        });
+      }
     } catch { /* ignore */ }
     setLoading(false);
   }, []);
@@ -55,7 +69,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
             onChange={(e) => { setFilter(e.target.value); setPage(0); }}
           >
             <option value="">{t('sysLog.allSources')}</option>
-            {SOURCES.map((s) => (
+            {sources.map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>

@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
 )
@@ -99,6 +101,7 @@ func newTestScheduler(t *testing.T, mock *mockCharger) (*Scheduler, *store.Store
 	s := &Scheduler{
 		charger:  mock,
 		store:    st,
+		events:   events.For(events.SourceScheduler, st),
 		log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		notifyCh: make(chan struct{}, 1),
 	}
@@ -1364,4 +1367,216 @@ func TestOnModeChanged_ToSchedule_NoStartOutsideWindow(t *testing.T) {
 	s.OnModeChanged("off", "schedule")
 
 	assert.Equal(t, 0, mock.starts, "schedule mode still respects window even on explicit switch")
+}
+
+// --- Fix 1: recompute freeze during active transaction ---
+
+// While the charger reports an open transaction, recompute() must early-return
+// and leave s.current untouched. Without the freeze, a mid-charge SoC rise
+// across SkipAboveSoC truncates the planned future periods of the active slot
+// and the next hour boundary ends the charge short of TargetSoC.
+func TestRecompute_FrozenDuringActiveTransaction(t *testing.T) {
+	now := time.Now()
+	origTimeNow := timeNow
+	timeNow = func() time.Time { return now }
+	defer func() { timeNow = origTimeNow }()
+
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 99}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	_ = st.Set("scheduler.battery_capacity", "52")
+	_ = st.Set("scheduler.target_soc", "85")
+	_ = st.Set("scheduler.skip_above_soc", "70")
+	_ = st.Set("scheduler.current_soc", "72") // would normally trigger SoC-skip
+
+	// Original schedule has the active period plus a planned future hour.
+	// A frozen recompute must keep BOTH; an unfrozen one would drop the
+	// future period when SoC-skip filters out all auto rates.
+	activePeriod := SchedulePeriod{
+		Start: now.Add(-15 * time.Minute),
+		End:   now.Add(45 * time.Minute),
+		Power: 11000,
+		Price: 0.30,
+	}
+	futurePeriod := SchedulePeriod{
+		Start: now.Add(45 * time.Minute),
+		End:   now.Add(1*time.Hour + 45*time.Minute),
+		Power: 11000,
+		Price: 0.32,
+	}
+	original := &Schedule{
+		Slots: []ScheduleSlot{{
+			Date:    now.Format("2006-01-02"),
+			Periods: []SchedulePeriod{activePeriod, futurePeriod},
+			Cost:    6.82,
+			Energy:  22,
+		}},
+		Cost:   6.82,
+		Energy: 22,
+	}
+	s.current = original
+	// Tariff returns only above-skip-threshold rates so the SoC-skip path would
+	// fire if recompute ran.
+	s.tariff = &mockTariff{rates: []tariff.Rate{
+		{Start: now.Add(45 * time.Minute), End: now.Add(1*time.Hour + 45*time.Minute), Price: 0.40},
+	}}
+
+	s.recompute()
+
+	require.NotNil(t, s.current, "frozen recompute must keep the existing schedule")
+	require.Same(t, original, s.current, "frozen recompute must NOT replace s.current")
+	require.Len(t, s.current.Slots, 1)
+	assert.Equal(t, []SchedulePeriod{activePeriod, futurePeriod}, s.current.Slots[0].Periods,
+		"planned future period must survive the freeze")
+}
+
+// First freeze emits a system event; subsequent recomputes for the same txnID
+// stay silent (no event spam every 15 minutes).
+func TestRecompute_FrozenEmitsEventOncePerSession(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 100}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+
+	s.recompute()
+	s.recompute()
+	s.recompute()
+
+	events, err := st.SystemEventsBySource("scheduler", 50, 0)
+	require.NoError(t, err)
+	frozen := 0
+	for _, e := range events {
+		if e.Action != "recompute" {
+			continue
+		}
+		raw, ok := e.Result.(json.RawMessage)
+		if !ok {
+			continue
+		}
+		var r map[string]any
+		if err := json.Unmarshal(raw, &r); err != nil {
+			continue
+		}
+		if v, _ := r["frozen"].(bool); v {
+			frozen++
+		}
+	}
+	assert.Equal(t, 1, frozen, "frozen event should fire only on the first freeze per session")
+}
+
+// After the transaction ends, the next recompute runs normally and the
+// freeze flag clears so the next session can emit its own first-freeze event.
+func TestRecompute_UnfreezesAfterTransactionEnds(t *testing.T) {
+	now := time.Now()
+	origTimeNow := timeNow
+	timeNow = func() time.Time { return now }
+	defer func() { timeNow = origTimeNow }()
+
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 101}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	_ = st.Set("scheduler.battery_capacity", "52")
+	_ = st.Set("scheduler.target_soc", "85")
+	_ = st.Set("scheduler.current_soc", "30")
+	_ = st.Set("scheduler.deadline_time", "07:00")
+	s.tariff = &mockTariff{rates: []tariff.Rate{
+		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.20},
+	}}
+
+	// Frozen: no schedule produced.
+	s.recompute()
+	require.Nil(t, s.current, "frozen recompute should not produce a schedule")
+	require.NotZero(t, s.recomputeFrozenTxnID)
+
+	// Transaction ends. Next recompute should run normally and clear the flag.
+	mock.setStatus("Preparing", 0)
+	s.recompute()
+
+	assert.Zero(t, s.recomputeFrozenTxnID, "frozen-txn flag must clear once transaction is gone")
+}
+
+// --- Fix 3: RequestModeChange debounce ---
+
+// A single RequestModeChange must NOT take effect synchronously: the store
+// stays on the previous mode, OnModeChanged hasn't fired yet, and the
+// pending change is exposed via PendingModeChange.
+func TestRequestModeChange_DoesNotApplyImmediately(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+
+	s.RequestModeChange("off")
+
+	assert.Equal(t, "schedule", st.GetDefault("charger.mode", ""),
+		"mode must not flip until debounce elapses")
+	assert.Equal(t, 0, mock.stops, "no OCPP stop until debounce elapses")
+	pending, applyAt := s.PendingModeChange()
+	assert.Equal(t, "off", pending, "PendingModeChange must surface the requested mode")
+	assert.False(t, applyAt.IsZero(), "applyAt must be populated")
+}
+
+// Multiple rapid RequestModeChange calls coalesce: only the LAST mode wins,
+// fired once, after modeChangeDebounce of silence from the last call.
+func TestRequestModeChange_CoalescesRapidClicks(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+
+	s.RequestModeChange("off")
+	s.RequestModeChange("force")
+	s.RequestModeChange("schedule") // back to current — still scheduled
+
+	// All calls within the debounce window — nothing applied yet.
+	assert.Equal(t, "schedule", st.GetDefault("charger.mode", ""))
+	assert.Equal(t, 0, mock.starts)
+	assert.Equal(t, 0, mock.stops)
+
+	// Drive the timer manually rather than waiting 5s in a test.
+	s.modeDebounceMu.Lock()
+	if s.modeDebounceTimer != nil {
+		s.modeDebounceTimer.Stop()
+	}
+	s.modeDebounceMu.Unlock()
+	s.applyPendingMode()
+
+	// Last requested mode wins. ("schedule" matches current → no OCPP churn,
+	// but OnModeChanged still ran which is observable via cooldown clear).
+	assert.Equal(t, "schedule", st.GetDefault("charger.mode", ""))
+	pending, _ := s.PendingModeChange()
+	assert.Empty(t, pending, "pending mode must be cleared after apply")
+}
+
+// When the final pending mode differs from the current applied mode, applying
+// fires the corresponding OCPP command via OnModeChanged.
+func TestRequestModeChange_AppliesLastMode(t *testing.T) {
+	now := time.Now()
+	origTimeNow := timeNow
+	timeNow = func() time.Time { return now }
+	defer func() { timeNow = origTimeNow }()
+
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	s.current = &Schedule{
+		Slots: []ScheduleSlot{{
+			Date: now.Format("2006-01-02"),
+			Periods: []SchedulePeriod{{
+				Start: now.Add(-15 * time.Minute),
+				End:   now.Add(15 * time.Minute),
+				Power: 11000,
+			}},
+		}},
+	}
+
+	s.RequestModeChange("schedule") // no-op intent
+	s.RequestModeChange("off")      // final intent
+
+	s.modeDebounceMu.Lock()
+	if s.modeDebounceTimer != nil {
+		s.modeDebounceTimer.Stop()
+	}
+	s.modeDebounceMu.Unlock()
+	s.applyPendingMode()
+
+	assert.Equal(t, "off", st.GetDefault("charger.mode", ""))
+	assert.Equal(t, 1, mock.stops, "off mode applied must send RemoteStopTransaction for the active txn")
 }

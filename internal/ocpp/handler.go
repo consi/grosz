@@ -6,6 +6,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -41,6 +42,15 @@ func (s *Server) OnBootNotification(chargePointId string, request *core.BootNoti
 
 	conf := core.NewBootNotificationConfirmation(types.NewDateTime(timeNow()), 120, core.RegistrationStatusAccepted)
 	s.recordEvent("send", chargePointId, "BootNotification", conf)
+	s.events.Info(events.ActionChargerBoot,
+		map[string]any{"cpID": chargePointId},
+		map[string]any{
+			"vendor":   request.ChargePointVendor,
+			"model":    request.ChargePointModel,
+			"serial":   request.ChargeBoxSerialNumber,
+			"firmware": request.FirmwareVersion,
+		},
+	)
 
 	// Fire boot hooks asynchronously
 	go s.fireBootHooks(chargePointId, request)
@@ -86,6 +96,20 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 		prev, _ := s.store.GetConnectorState(chargePointId, request.ConnectorId)
 		isRealChange := prev == nil || prev.Status != newStatus
 		if isRealChange {
+			fromStatus := ""
+			if prev != nil {
+				fromStatus = prev.Status
+			}
+			s.events.Info(events.ActionConnectorStatusChanged,
+				map[string]any{
+					"cpID":        chargePointId,
+					"connectorID": request.ConnectorId,
+					"from":        fromStatus,
+					"to":          newStatus,
+					"errorCode":   string(request.ErrorCode),
+				},
+				nil,
+			)
 			switch request.Status {
 			case core.ChargePointStatusPreparing:
 				_ = s.store.InsertChartMarker("plug", ts)
@@ -186,11 +210,10 @@ func (s *Server) finalizeSessionOnStop(cpID string, connID int, stopTime time.Ti
 	s.log.Info("finalized session on stop status",
 		"txn", cs.TransactionID, "energy", energy, "cost", cost, "stopTime", stopTime,
 	)
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "ocpp", Action: "finalizeSessionOnStop", Level: "info",
-		Input:  map[string]any{"txn": cs.TransactionID, "cpID": cpID},
-		Result: map[string]any{"energy": energy, "cost": cost, "stopTime": stopTime.UTC().Format(time.RFC3339)},
-	})
+	s.events.Info(events.ActionFinalizeSessionOnStop,
+		map[string]any{"txn": cs.TransactionID, "cpID": cpID},
+		map[string]any{"energy": energy, "cost": cost, "stopTime": stopTime.UTC().Format(time.RFC3339)},
+	)
 	if s.socUpdater != nil {
 		s.socUpdater(energy)
 	}
@@ -227,11 +250,10 @@ func (s *Server) recordFinalizeWarn(cpID string, txnID int, reason string) {
 	if s.store == nil {
 		return
 	}
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "ocpp", Action: "finalizeSessionOnStop", Level: "warn",
-		Input:  map[string]any{"txn": txnID, "cpID": cpID},
-		Result: map[string]any{"skipped": reason},
-	})
+	s.events.Warn(events.ActionFinalizeSessionOnStop,
+		map[string]any{"txn": txnID, "cpID": cpID},
+		map[string]any{"skipped": reason},
+	)
 }
 
 // OnMeterValues handles meter value readings.
@@ -322,6 +344,10 @@ func (s *Server) OnStartTransaction(chargePointId string, request *core.StartTra
 		txnID,
 	)
 	s.recordEvent("send", chargePointId, "StartTransaction", conf)
+	s.events.Info(events.ActionTransactionStarted,
+		map[string]any{"cpID": chargePointId, "connectorID": request.ConnectorId, "idTag": request.IdTag},
+		map[string]any{"txnID": txnID, "meterStartWh": request.MeterStart},
+	)
 	s.fireStatusHook()
 	return conf, nil
 }
@@ -402,7 +428,12 @@ func (s *Server) OnStopTransaction(chargePointId string, request *core.StopTrans
 	conf := core.NewStopTransactionConfirmation()
 	conf.IdTagInfo = types.NewIdTagInfo(types.AuthorizationStatusAccepted)
 	s.recordEvent("send", chargePointId, "StopTransaction", conf)
+	s.events.Info(events.ActionTransactionStopped,
+		map[string]any{"cpID": chargePointId, "txnID": request.TransactionId, "reason": string(request.Reason)},
+		map[string]any{"meterStopWh": request.MeterStop},
+	)
 	s.fireStatusHook()
+	s.fireTransactionEndedHook(chargePointId, stoppedConnID, request.TransactionId)
 	return conf, nil
 }
 

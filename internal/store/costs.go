@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // ExternalCost represents a manually added cost entry.
@@ -26,11 +28,10 @@ func (s *Store) AddExternalCost(cost ExternalCost) (int64, error) {
 	}
 	id, _ := result.LastInsertId()
 
-	_ = s.RecordSystemEvent(SystemEvent{
-		Timestamp: time.Now(), Source: "costs", Action: "add",
-		Input:  map[string]any{"date": cost.Date, "description": cost.Description, "amount": cost.Amount},
-		Result: map[string]any{"id": id},
-	})
+	events.Info(s, events.SourceCosts, events.ActionCostsAdd,
+		map[string]any{"date": cost.Date, "description": cost.Description, "amount": cost.Amount},
+		map[string]any{"id": id},
+	)
 
 	return id, nil
 }
@@ -46,11 +47,10 @@ func (s *Store) DeleteExternalCost(id int64) error {
 		return sql.ErrNoRows
 	}
 
-	_ = s.RecordSystemEvent(SystemEvent{
-		Timestamp: time.Now(), Source: "costs", Action: "delete",
-		Input:  map[string]any{"id": id},
-		Result: map[string]any{"deleted": true},
-	})
+	events.Info(s, events.SourceCosts, events.ActionCostsDelete,
+		map[string]any{"id": id},
+		map[string]any{"deleted": true},
+	)
 
 	return nil
 }

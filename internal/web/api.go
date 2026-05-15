@@ -11,6 +11,7 @@ import (
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/scheduler"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
@@ -25,12 +26,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	offset := queryInt(r, "offset", 0)
 	action := r.URL.Query().Get("action")
 
-	var events any
+	var evs any
 	var err error
 	if action != "" {
-		events, err = s.store.EventsByAction(action, n, offset)
+		evs, err = s.store.EventsByAction(action, n, offset)
 	} else {
-		events, err = s.store.RecentEvents(n, offset)
+		evs, err = s.store.RecentEvents(n, offset)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -39,7 +40,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	total, _ := s.store.EventCount(action)
 
-	writeJSON(w, map[string]any{"events": events, "total": total})
+	writeJSON(w, map[string]any{"events": evs, "total": total})
 }
 
 func (s *Server) handleSystemEvents(w http.ResponseWriter, r *http.Request) {
@@ -47,12 +48,12 @@ func (s *Server) handleSystemEvents(w http.ResponseWriter, r *http.Request) {
 	offset := queryInt(r, "offset", 0)
 	source := r.URL.Query().Get("source")
 
-	var events any
+	var evs any
 	var err error
 	if source != "" {
-		events, err = s.store.SystemEventsBySource(source, n, offset)
+		evs, err = s.store.SystemEventsBySource(source, n, offset)
 	} else {
-		events, err = s.store.RecentSystemEvents(n, offset)
+		evs, err = s.store.RecentSystemEvents(n, offset)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -60,8 +61,9 @@ func (s *Server) handleSystemEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total, _ := s.store.SystemEventCount(source)
+	sources, _ := s.store.DistinctSystemEventSources()
 
-	writeJSON(w, map[string]any{"events": events, "total": total})
+	writeJSON(w, map[string]any{"events": evs, "total": total, "sources": sources})
 }
 
 func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
@@ -259,10 +261,9 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		"powerW": req.PowerW,
 	}
 	if err != nil {
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "createOverride", Level: "warn",
-			Input: input, Result: map[string]any{"error": err.Error()},
-		})
+		events.Warn(s.store, events.SourceScheduler, events.ActionCreateOverride,
+			input, map[string]any{"error": err.Error()},
+		)
 		if errors.Is(err, store.ErrOverlap) {
 			writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "overlaps existing override"})
 			return
@@ -272,10 +273,9 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 	}
 	o.ID = id
 
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "createOverride",
-		Input: input, Result: map[string]any{"id": id},
-	})
+	events.Info(s.store, events.SourceScheduler, events.ActionCreateOverride,
+		input, map[string]any{"id": id},
+	)
 
 	if s.scheduler != nil {
 		s.scheduler.NotifyImmediate()
@@ -291,10 +291,10 @@ func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteOverride(id); err != nil {
-		_ = s.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "scheduler", Action: "deleteOverride", Level: "warn",
-			Input: map[string]any{"id": id}, Result: map[string]any{"error": err.Error()},
-		})
+		events.Warn(s.store, events.SourceScheduler, events.ActionDeleteOverride,
+			map[string]any{"id": id},
+			map[string]any{"error": err.Error()},
+		)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -303,10 +303,10 @@ func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "scheduler", Action: "deleteOverride",
-		Input: map[string]any{"id": id}, Result: map[string]any{"ok": true},
-	})
+	events.Info(s.store, events.SourceScheduler, events.ActionDeleteOverride,
+		map[string]any{"id": id},
+		map[string]any{"ok": true},
+	)
 
 	if s.scheduler != nil {
 		s.scheduler.NotifyImmediate()
@@ -335,6 +335,10 @@ func (s *Server) handleChargerStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.web.Info(events.ActionManualChargeStarted,
+		map[string]any{"cpID": cpID, "idTag": idTag},
+		map[string]any{"ok": true},
+	)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -354,6 +358,10 @@ func (s *Server) handleChargerStop(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			s.web.Info(events.ActionManualChargeStopped,
+				map[string]any{"cpID": cpID, "txnID": c.TransactionID},
+				map[string]any{"ok": true},
+			)
 			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
@@ -447,28 +455,27 @@ func (s *Server) handleSetChargerMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldMode := s.store.GetDefault("charger.mode", "schedule")
-
-	if err := s.store.Set("charger.mode", req.Mode); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Mode changes are debounced 5s server-side so a rapid misclick
+	// (Schedule → Off → Schedule) coalesces into one transition. The
+	// scheduler owns the store.Set + ClearSchedule + OnModeChanged sequence
+	// fired at the end of the debounce window.
+	if s.scheduler == nil {
+		http.Error(w, "scheduler not enabled", http.StatusServiceUnavailable)
 		return
 	}
+	currentMode := s.store.GetDefault("charger.mode", "schedule")
+	s.web.Info(events.ActionModeSwitchRequested,
+		map[string]any{"from": currentMode, "to": req.Mode},
+		nil,
+	)
+	s.scheduler.RequestModeChange(req.Mode)
+	_, applyAt := s.scheduler.PendingModeChange()
 
-	switch req.Mode {
-	case "off", "force":
-		if s.scheduler != nil {
-			s.scheduler.ClearSchedule()
-		}
+	resp := map[string]any{"ok": true, "mode": req.Mode, "pending": true}
+	if !applyAt.IsZero() {
+		resp["applyAt"] = applyAt.Format(time.RFC3339)
 	}
-
-	// Synchronously enforce the new mode: clear cooldowns, run controlCharging
-	// against the explicit new mode, then schedule a recompute. Replaces the
-	// old debounced Notify() path that could take 5s + 30s to act.
-	if s.scheduler != nil {
-		s.scheduler.OnModeChanged(oldMode, req.Mode)
-	}
-
-	writeJSON(w, map[string]any{"ok": true, "mode": req.Mode})
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleChartMarkers(w http.ResponseWriter, r *http.Request) {

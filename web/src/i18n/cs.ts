@@ -176,6 +176,7 @@ const cs: Translations = {
   'settings.userManagement': 'Spr\u00e1va u\u017eivatel\u016f',
   'settings.username': 'U\u017eivatelsk\u00e9 jm\u00e9no',
   'settings.password': 'Heslo',
+  'settings.sessionLifetimeDays': 'Doba platnosti relace (dny)',
   'settings.ocppServer': 'OCPP server',
   'settings.authKey': 'Autoriza\u010dn\u00ed kl\u00ed\u010d',
   'settings.charger': 'Nab\u00edje\u010dka',
@@ -225,6 +226,9 @@ const cs: Translations = {
   'controls.heading': 'Ru\u010dn\u00ed ovl\u00e1d\u00e1n\u00ed',
   'controls.start': 'Spustit nab\u00edjen\u00ed',
   'controls.stop': 'Zastavit nab\u00edjen\u00ed',
+
+  'version.newVersion': 'Byla nasazena nov\u00e1 verze',
+  'version.reload': 'Znovu na\u010d\u00edst aplikaci',
 };
 
 export default cs;

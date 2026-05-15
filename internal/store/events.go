@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // Event represents an OCPP message event.
@@ -216,8 +218,12 @@ func parseEventTime(primary, fallback string) time.Time {
 // PurgeOldEvents deletes events older than maxAge.
 func (s *Store) PurgeOldEvents(maxAge time.Duration) error {
 	cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
-	_, err := s.db.Exec("DELETE FROM ocpp_events WHERE timestamp < ?", cutoff)
-	return err
+	res, err := s.db.Exec("DELETE FROM ocpp_events WHERE timestamp < ?", cutoff)
+	if err != nil {
+		return err
+	}
+	emitPurge(s, events.ActionPurgeOcppEvents, maxAge, res)
+	return nil
 }
 
 // EventsSince returns events after the given ID, oldest first (for SSE catch-up).

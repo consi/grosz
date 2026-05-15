@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import type { Rate, Schedule, HourlyEnergy } from '../types';
 import { useTranslation } from '../i18n';
 
@@ -24,12 +24,20 @@ function formatDate(d: Date, tz: string, locale: string): string {
   return d.toLocaleDateString(locale, { day: 'numeric', month: 'short', timeZone: tz });
 }
 
+const DRAG_THRESHOLD_PX = 6;
+const DOUBLE_TAP_MS = 300;
+
 export function PriceChart({ rates, schedule, consumption, markers, timezone }: Props) {
   const { t, locale } = useTranslation();
   const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
+  const [zoom, setZoom] = useState<{ startMs: number; endMs: number } | null>(null);
+  const [drag, setDrag] = useState<{ startX: number; currentX: number } | null>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
   const roRef = useRef<ResizeObserver>(null);
+  const pointerDownXRef = useRef<number | null>(null);
+  const lastTapRef = useRef<number>(0);
+  const draggingRef = useRef<boolean>(false);
 
   const setChartRef = useCallback((node: HTMLDivElement | null) => {
     chartRef.current = node;
@@ -43,6 +51,19 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
     }
   }, []);
 
+  // If the zoom window no longer covers ≥2 rates after a refresh, fall back to
+  // the full range so the chart stays renderable. The zoom state remains and
+  // will recover automatically if fresh rates reintroduce the window.
+  const viewRates = useMemo(() => {
+    if (!zoom) return rates;
+    const filtered = rates.filter((r) => {
+      const s = new Date(r.start).getTime();
+      const e = new Date(r.end).getTime();
+      return e > zoom.startMs && s < zoom.endMs;
+    });
+    return filtered.length >= 2 ? filtered : rates;
+  }, [rates, zoom]);
+
   if (!rates?.length) {
     return (
       <div className="card">
@@ -52,7 +73,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
     );
   }
 
-  const prices = rates.map((r) => r.price);
+  const prices = viewRates.map((r) => r.price);
   const maxPrice = Math.max(...prices);
   const minPrice = Math.min(...prices);
   const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
@@ -98,13 +119,13 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
   const maxDisplay = useKwh ? maxWh / 1000 : maxWh;
   const energyUnit = useKwh ? 'kWh' : 'Wh';
 
-  const barCount = rates.length;
+  const barCount = viewRates.length;
   const chartHeight = 360;
 
   // Build consumption line — only connect points that have data
   const consumptionPoints: { x: number; y: number; wh: number }[] = [];
   if (hasConsumption) {
-    rates.forEach((r, i) => {
+    viewRates.forEach((r, i) => {
       const wh = consumptionMap.get(toHourKey(new Date(r.start))) ?? 0;
       if (wh > 0) {
         const xLeft = (i / barCount) * 100;
@@ -120,9 +141,9 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
   const scheduleRanges: { startIdx: number; endIdx: number }[] = [];
   if (scheduledRanges.length > 0) {
     let rangeStart = -1;
-    for (let i = 0; i < rates.length; i++) {
-      const rs = new Date(rates[i].start).getTime();
-      const re = new Date(rates[i].end).getTime();
+    for (let i = 0; i < viewRates.length; i++) {
+      const rs = new Date(viewRates[i].start).getTime();
+      const re = new Date(viewRates[i].end).getTime();
       if (isScheduledHour(rs, re)) {
         if (rangeStart === -1) rangeStart = i;
       } else {
@@ -133,14 +154,14 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
       }
     }
     if (rangeStart !== -1) {
-      scheduleRanges.push({ startIdx: rangeStart, endIdx: rates.length - 1 });
+      scheduleRanges.push({ startIdx: rangeStart, endIdx: viewRates.length - 1 });
     }
   }
 
   // X-axis labels: hours + date on day boundaries
   const xLabels: { idx: number; hour: string; date?: string }[] = [];
   let lastDate = '';
-  rates.forEach((r, i) => {
+  viewRates.forEach((r, i) => {
     const d = new Date(r.start);
     const hour = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: timezone }).slice(0, 2);
     const dateStr = formatDate(d, timezone, locale);
@@ -150,7 +171,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
   });
 
   // Hover data
-  const hoverRate = hover !== null ? rates[hover.idx] : null;
+  const hoverRate = hover !== null ? viewRates[hover.idx] : null;
   const hoverStart = hoverRate ? new Date(hoverRate.start) : null;
   const hoverWh = hoverRate ? consumptionMap.get(toHourKey(new Date(hoverRate.start))) : undefined;
   const hoverCost = hoverWh !== undefined && hoverRate ? (hoverRate.price * hoverWh / 1000) : undefined;
@@ -158,16 +179,103 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
     ? isScheduledHour(new Date(hoverRate.start).getTime(), new Date(hoverRate.end).getTime())
     : false;
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    const area = chartRef.current;
-    if (!area) return;
-    const rect = area.getBoundingClientRect();
+  const idxAtX = (x: number, rect: DOMRect): number => {
+    const idx = Math.floor((x / rect.width) * barCount);
+    return Math.max(0, Math.min(barCount - 1, idx));
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const idx = Math.floor((x / rect.width) * barCount);
-    if (idx >= 0 && idx < barCount) {
-      setHover({ idx, x, y });
+    pointerDownXRef.current = x;
+    draggingRef.current = false;
+
+    if (e.pointerType !== 'mouse') {
+      const now = Date.now();
+      if (zoom && now - lastTapRef.current < DOUBLE_TAP_MS) {
+        setZoom(null);
+        setHover(null);
+        pointerDownXRef.current = null;
+        lastTapRef.current = 0;
+        return;
+      }
+      lastTapRef.current = now;
     }
+
+    if (rect.width > 0 && barCount > 0) {
+      setHover({ idx: idxAtX(x, rect), x, y });
+    }
+
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const startX = pointerDownXRef.current;
+    if (startX != null) {
+      if (draggingRef.current || Math.abs(x - startX) >= DRAG_THRESHOLD_PX) {
+        if (!draggingRef.current) {
+          draggingRef.current = true;
+          setHover(null);
+        }
+        setDrag({ startX, currentX: x });
+        return;
+      }
+    }
+
+    // Hover mode (no active drag)
+    if (rect.width <= 0 || barCount <= 0) return;
+    const idx = idxAtX(x, rect);
+    setHover({ idx, x, y });
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    const wasDragging = draggingRef.current;
+    const startX = pointerDownXRef.current;
+    pointerDownXRef.current = null;
+    draggingRef.current = false;
+
+    if (wasDragging && startX != null) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const currentX = e.clientX - rect.left;
+      const a = Math.min(startX, currentX);
+      const b = Math.max(startX, currentX);
+      if (rect.width > 0 && barCount > 0 && b - a >= DRAG_THRESHOLD_PX) {
+        const firstIdx = idxAtX(a, rect);
+        const lastIdx = idxAtX(b, rect);
+        if (lastIdx > firstIdx) {
+          const startMs = new Date(viewRates[firstIdx].start).getTime();
+          const endMs = new Date(viewRates[lastIdx].end).getTime();
+          setZoom({ startMs, endMs });
+        }
+      }
+    }
+    setDrag(null);
+  };
+
+  const handlePointerCancel = () => {
+    pointerDownXRef.current = null;
+    draggingRef.current = false;
+    setDrag(null);
+  };
+
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!zoom) return;
+    e.preventDefault();
+    setZoom(null);
+    setHover(null);
+  };
+
+  const handlePointerLeave = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (draggingRef.current) return;
+    // On touch, leave fires when the finger lifts — keep the tooltip pinned
+    // so a tap shows details until the next interaction.
+    if (e.pointerType === 'mouse') setHover(null);
   };
 
   return (
@@ -200,8 +308,13 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
         <div
           className="chart-area"
           ref={setChartRef}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => setHover(null)}
+          style={{ touchAction: 'pan-y' }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onPointerLeave={handlePointerLeave}
+          onContextMenu={handleContextMenu}
         >
           {/* Schedule background areas */}
           {scheduleRanges.map((range, ri) => {
@@ -221,7 +334,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
           )}
 
           <div className="chart">
-            {rates.map((r, i) => {
+            {viewRates.map((r, i) => {
               const start = new Date(r.start);
               const height = (Math.abs(r.price) / scaleRange) * 100;
               const isNeg = r.price < 0;
@@ -248,8 +361,8 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
           {/* RemoteStart/Stop markers */}
           {markers?.map((m, mi) => {
             const mt = new Date(m.time).getTime();
-            const chartStart = new Date(rates[0].start).getTime();
-            const chartEnd = new Date(rates[rates.length - 1].end).getTime();
+            const chartStart = new Date(viewRates[0].start).getTime();
+            const chartEnd = new Date(viewRates[viewRates.length - 1].end).getTime();
             if (mt < chartStart || mt > chartEnd) return null;
             const left = ((mt - chartStart) / (chartEnd - chartStart)) * 100;
             return (
@@ -274,8 +387,19 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
             </svg>
           )}
 
+          {/* Zoom selection rectangle */}
+          {drag && (
+            <div
+              className="zoom-selection"
+              style={{
+                left: Math.min(drag.startX, drag.currentX),
+                width: Math.abs(drag.currentX - drag.startX),
+              }}
+            />
+          )}
+
           {/* Hover tooltip */}
-          {hover !== null && hoverRate && hoverStart && (
+          {hover !== null && hoverRate && hoverStart && !drag && (
             <div
               className="chart-tooltip"
               style={{

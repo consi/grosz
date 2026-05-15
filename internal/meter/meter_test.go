@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -19,8 +20,9 @@ func newTestPoller(t *testing.T) *Poller {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = st.Close() })
 	return &Poller{
-		store: st,
-		log:   slog.Default().With("component", "meter"),
+		store:  st,
+		events: events.For(events.SourceMeter, st),
+		log:    slog.Default().With("component", "meter"),
 	}
 }
 
@@ -64,7 +66,7 @@ func TestAdjustEnergy_ResetTriggersOffsetBump(t *testing.T) {
 	events, err := p.store.SystemEventsBySource("meter", 10, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
-	assert.Equal(t, "reset_detected", events[0].Action)
+	assert.Equal(t, "meterResetDetected", events[0].Action)
 }
 
 func TestAdjustEnergy_SmallNoiseClampedNotReset(t *testing.T) {

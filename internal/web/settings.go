@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/zappi"
 )
 
@@ -77,12 +78,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log what changed (redact sensitive values)
-	for k, v := range updates {
-		if sensitiveKeys[k] {
-			v = "****"
-		}
+	redacted := events.RedactSettings(updates)
+	for k, v := range redacted {
 		s.log.Info("setting updated", "key", k, "value", v)
 	}
+	changedKeys := make([]string, 0, len(updates))
+	for k := range updates {
+		changedKeys = append(changedKeys, k)
+	}
+	s.web.Info(events.ActionSettingsUpdated, redacted,
+		map[string]any{"changedKeys": changedKeys},
+	)
 
 	// Push changed settings to connected charger via OCPP ChangeConfiguration
 	cpID := s.store.GetDefault("zappi.charge_box_id", "")

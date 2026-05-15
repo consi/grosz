@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -43,6 +44,7 @@ type pstrykPricing struct {
 // Pstryk implements Provider for the Pstryk.pl API.
 type Pstryk struct {
 	store   *store.Store
+	events  *events.Bound
 	log     *slog.Logger
 	client  *http.Client
 	baseURL string
@@ -63,6 +65,7 @@ func NewPstrykWithURL(st *store.Store, log *slog.Logger, baseURL string) *Pstryk
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Pstryk{
 		store:   st,
+		events:  events.For(events.SourceTariff, st),
 		log:     log.With("component", "tariff", "provider", pstrykName),
 		client:  &http.Client{Timeout: 30 * time.Second},
 		cancel:  cancel,
@@ -144,20 +147,16 @@ func (p *Pstryk) fetchAndStore() {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
 		p.log.Warn("pstryk token not configured, skipping fetch")
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "tariff", Action: "fetchRates", Level: "warn",
-			Result: map[string]any{"skipped": true, "reason": "token not configured"},
-		})
+		p.events.Warn(events.ActionFetchRates, nil,
+			map[string]any{"skipped": true, "reason": "token not configured"},
+		)
 		return
 	}
 
 	rates, err := p.fetch(token)
 	if err != nil {
 		p.log.Warn("failed to fetch rates", "err", err)
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "tariff", Action: "fetchRates", Level: "warn",
-			Result: map[string]any{"error": err.Error()},
-		})
+		p.events.Error(events.ActionFetchRates, nil, err)
 		return
 	}
 
@@ -165,19 +164,17 @@ func (p *Pstryk) fetchAndStore() {
 	beforeCount := len(rates)
 	rates = filterPlaceholders(rates)
 	if len(rates) < beforeCount {
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "tariff", Action: "filterPlaceholders",
-			Input:  map[string]any{"beforeCount": beforeCount},
-			Result: map[string]any{"afterCount": len(rates), "removed": beforeCount - len(rates)},
-		})
+		p.events.Info(events.ActionFilterPlaceholders,
+			map[string]any{"beforeCount": beforeCount},
+			map[string]any{"afterCount": len(rates), "removed": beforeCount - len(rates)},
+		)
 	}
 
 	if len(rates) == 0 {
 		p.log.Warn("no valid rates returned")
-		_ = p.store.RecordSystemEvent(store.SystemEvent{
-			Timestamp: time.Now(), Source: "tariff", Action: "fetchRates", Level: "warn",
-			Result: map[string]any{"error": "no valid rates returned"},
-		})
+		p.events.Warn(events.ActionFetchRates, nil,
+			map[string]any{"error": "no valid rates returned"},
+		)
 		return
 	}
 
@@ -195,14 +192,13 @@ func (p *Pstryk) fetchAndStore() {
 		"from", rates[0].Start.Format(time.RFC3339),
 		"to", rates[len(rates)-1].End.Format(time.RFC3339),
 	)
-	_ = p.store.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "tariff", Action: "fetchRates",
-		Result: map[string]any{
+	p.events.Info(events.ActionFetchRates, nil,
+		map[string]any{
 			"count": len(rates),
 			"from":  rates[0].Start.Format(time.RFC3339),
 			"to":    rates[len(rates)-1].End.Format(time.RFC3339),
 		},
-	})
+	)
 }
 
 func (p *Pstryk) fetch(token string) ([]Rate, error) {

@@ -16,6 +16,7 @@ interface Props {
 export function GridStatus({ data }: Props) {
   const { t } = useTranslation();
   const [history, setHistory] = useState<PhaseReading[]>([]);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   const fetchHistory = useCallback(() => {
     fetch('/api/meter/phases?minutes=60')
@@ -47,6 +48,14 @@ export function GridStatus({ data }: Props) {
     history.map((r) => r.phase3W),
   ];
 
+  const hoverReading = hoverIdx != null ? history[hoverIdx] : null;
+
+  const phaseValues: [number, number, number] = [
+    hoverReading ? hoverReading.phase1W : data.phases[0]?.power ?? 0,
+    hoverReading ? hoverReading.phase2W : data.phases[1]?.power ?? 0,
+    hoverReading ? hoverReading.phase3W : data.phases[2]?.power ?? 0,
+  ];
+
   return (
     <div className="card">
       <h2>{t('grid.heading')}</h2>
@@ -59,10 +68,14 @@ export function GridStatus({ data }: Props) {
       <div className="grid-status">
         {data.phases.map((phase, i) => (
           <div key={i} className="grid-phase">
-            <Sparkline data={phaseData[i]} />
+            <Sparkline
+              data={phaseData[i]}
+              hoverIdx={hoverIdx}
+              onHoverChange={setHoverIdx}
+            />
             <div className="grid-phase-content">
               <div className="grid-phase-title">{t('grid.phase', { n: i + 1 })}</div>
-              <div className="grid-value">{phase.power.toFixed(0)} W</div>
+              <div className="grid-value">{phaseValues[i].toFixed(0)} W</div>
               <div className="grid-detail">{phase.voltage.toFixed(1)} V</div>
               <div className="grid-detail">{phase.current.toFixed(2)} A</div>
             </div>
@@ -73,7 +86,13 @@ export function GridStatus({ data }: Props) {
   );
 }
 
-function Sparkline({ data }: { data: number[] }) {
+interface SparklineProps {
+  data: number[];
+  hoverIdx: number | null;
+  onHoverChange: (idx: number | null) => void;
+}
+
+function Sparkline({ data, hoverIdx, onHoverChange }: SparklineProps) {
   if (data.length < 2) return null;
 
   const w = 200;
@@ -90,14 +109,61 @@ function Sparkline({ data }: { data: number[] }) {
   const areaPath = `M0,${h} L${points.join(' L')} L${w},${h} Z`;
   const linePath = `M${points.join(' L')}`;
 
+  const updateFromPointer = (e: React.PointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const x = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, x / rect.width));
+    const idx = Math.round(ratio * (data.length - 1));
+    onHoverChange(idx);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    updateFromPointer(e);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    if (e.pointerType !== 'mouse') onHoverChange(null);
+  };
+
+  const validIdx = hoverIdx != null && hoverIdx >= 0 && hoverIdx < data.length ? hoverIdx : null;
+  const cursorX = validIdx != null ? validIdx * step : 0;
+  const cursorY = validIdx != null ? h - (data[validIdx] / max) * h : 0;
+
   return (
     <svg
       className="sparkline"
       viewBox={`0 0 ${w} ${h}`}
       preserveAspectRatio="none"
+      style={{ touchAction: 'pan-y' }}
+      onPointerMove={updateFromPointer}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={() => onHoverChange(null)}
+      onPointerCancel={() => onHoverChange(null)}
     >
       <path d={areaPath} className="sparkline-area" />
       <path d={linePath} className="sparkline-line" />
+      {validIdx != null && (
+        <>
+          <line
+            x1={cursorX}
+            x2={cursorX}
+            y1={0}
+            y2={h}
+            className="sparkline-cursor"
+          />
+          <circle
+            cx={cursorX}
+            cy={cursorY}
+            r={2}
+            className="sparkline-cursor-dot"
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
+      )}
     </svg>
   );
 }

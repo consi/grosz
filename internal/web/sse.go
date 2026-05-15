@@ -13,6 +13,7 @@ type SSEBroker struct {
 	clients map[chan string]struct{}
 	log     *slog.Logger
 	closed  bool
+	bootID  string
 }
 
 // NewSSEBroker creates a new SSE broker.
@@ -21,6 +22,13 @@ func NewSSEBroker(log *slog.Logger) *SSEBroker {
 		clients: make(map[chan string]struct{}),
 		log:     log.With("component", "sse"),
 	}
+}
+
+// SetBootID configures the per-process boot ID, pushed to each new SSE client on connect.
+func (b *SSEBroker) SetBootID(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bootID = id
 }
 
 // ServeHTTP handles SSE client connections.
@@ -54,6 +62,15 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial ping
 	_, _ = fmt.Fprintf(w, "event: ping\ndata: connected\n\n")
+
+	// Send boot ID so the frontend can detect a new server build.
+	b.mu.RLock()
+	bootID := b.bootID
+	b.mu.RUnlock()
+	if bootID != "" {
+		_, _ = fmt.Fprintf(w, "event: bootid\ndata: %s\n\n", bootID)
+	}
+
 	flusher.Flush()
 
 	for {

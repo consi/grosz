@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // Rate represents an electricity tariff rate for a time period.
@@ -141,9 +143,13 @@ func (s *Store) CalculateSessionCost(start, stop time.Time, energyKWh float64) f
 
 // PurgeOldRates removes rates that ended before the given time.
 func (s *Store) PurgeOldRates(before time.Time) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		"DELETE FROM tariff_rates WHERE end_time < ?",
 		before.UTC().Format(time.RFC3339),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	emitPurgeBefore(s, events.ActionPurgeRates, before, res)
+	return nil
 }

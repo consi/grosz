@@ -192,6 +192,7 @@ const pl: Translations = {
   'settings.userManagement': 'Zarz\u0105dzanie u\u017cytkownikami',
   'settings.username': 'Nazwa u\u017cytkownika',
   'settings.password': 'Has\u0142o',
+  'settings.sessionLifetimeDays': 'D\u0142ugo\u015b\u0107 sesji (dni)',
   'settings.ocppServer': 'Serwer OCPP',
   'settings.authKey': 'Klucz autoryzacji',
   'settings.charger': '\u0141adowarka',
@@ -241,6 +242,9 @@ const pl: Translations = {
   'controls.heading': 'Sterowanie r\u0119czne',
   'controls.start': 'Rozpocznij \u0142adowanie',
   'controls.stop': 'Zatrzymaj \u0142adowanie',
+
+  'version.newVersion': 'Wdro\u017cono now\u0105 wersj\u0119',
+  'version.reload': 'Prze\u0142aduj aplikacj\u0119',
 };
 
 export default pl;

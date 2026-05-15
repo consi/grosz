@@ -319,7 +319,7 @@ nav button:hover { color: var(--text); }
   left: 0;
   right: 0;
   border-radius: 2px 2px 0 0;
-  cursor: pointer;
+  cursor: crosshair;
   transition: opacity 0.2s;
 }
 .bar.negative {
@@ -346,7 +346,16 @@ nav button:hover { color: var(--text); }
 
 /* Chart layout with axes */
 .chart-wrapper { display: flex; align-items: stretch; gap: 6px; }
-.chart-area { flex: 1; position: relative; min-width: 0; }
+.chart-area { flex: 1; position: relative; min-width: 0; cursor: crosshair; user-select: none; -webkit-user-select: none; }
+
+/* Drag-to-zoom selection rectangle */
+.zoom-selection {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(33, 150, 243, 0.15);
+  border-left: 1px solid rgba(33, 150, 243, 0.6);
+  border-right: 1px solid rgba(33, 150, 243, 0.6);
+  pointer-events: none; z-index: 5;
+}
 
 /* Zero baseline for negative prices */
 .zero-line {
@@ -538,22 +547,47 @@ nav button:hover { color: var(--text); }
 .mode-btn.active.off { background: var(--danger); color: white; }
 .mode-btn.active.schedule { background: var(--primary); color: white; }
 .mode-btn.active.force { background: var(--accent); color: white; }
+/* 3 blinks of 1s each = 3s, matching the server-side debounce window. After
+   the 3rd iteration the animation stops; by then applyPendingMode has fired
+   and SSE pushes the cleared pendingMode so the .pending class drops. */
+.mode-btn.pending.off       { animation: mode-breathe-off 1s ease-in-out 3; }
+.mode-btn.pending.schedule  { animation: mode-breathe-schedule 1s ease-in-out 3; }
+.mode-btn.pending.force     { animation: mode-breathe-force 1s ease-in-out 3; }
+@keyframes mode-breathe-off {
+  0%, 100% { background: rgba(244, 67, 54, 0.18); color: var(--text); }
+  50%      { background: var(--danger);            color: white;       }
+}
+@keyframes mode-breathe-schedule {
+  0%, 100% { background: rgba(33, 150, 243, 0.18); color: var(--text); }
+  50%      { background: var(--primary);           color: white;       }
+}
+@keyframes mode-breathe-force {
+  0%, 100% { background: rgba(255, 152, 0, 0.18);  color: var(--text); }
+  50%      { background: var(--accent);            color: white;       }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mode-btn.pending.off,
+  .mode-btn.pending.schedule,
+  .mode-btn.pending.force { animation: none; outline: 2px dashed currentColor; outline-offset: -3px; }
+}
 .mode-error { background: rgba(244, 67, 54, 0.15); color: #ff6b6b; padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; margin-top: 0.5rem; }
 
 /* Grid Status */
 .grid-status { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
 .grid-phase { background: var(--bg); border-radius: 6px; position: relative; overflow: hidden; }
-.grid-phase-content { position: relative; z-index: 1; padding: 0.75rem; }
+.grid-phase-content { position: relative; z-index: 1; padding: 0.75rem; pointer-events: none; }
 .grid-phase-title { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
 .grid-value { font-size: 1.2rem; font-weight: 700; margin-bottom: 2px; }
 .grid-detail { font-size: 0.8rem; color: var(--muted); }
 
 .sparkline {
   position: absolute; bottom: 0; left: 0; width: 100%; height: 60%;
-  pointer-events: none;
+  cursor: crosshair;
 }
 .sparkline-area { fill: rgba(76, 175, 80, 0.1); }
 .sparkline-line { fill: none; stroke: rgba(76, 175, 80, 0.35); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.sparkline-cursor { stroke: rgba(76, 175, 80, 0.8); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.sparkline-cursor-dot { fill: rgba(76, 175, 80, 1); }
 .grid-total {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 0.75rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border);
@@ -799,4 +833,51 @@ nav button:hover { color: var(--text); }
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.version-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 0.6rem 1.5rem;
+  background: #000;
+  color: #fff;
+  border: 1px solid var(--border);
+  border-top: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  font-size: 0.9rem;
+  min-width: 480px;
+  max-width: calc(100vw - 1rem);
+}
+.version-banner button {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.35rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.version-banner button:hover {
+  filter: brightness(1.1);
+}
+@media (max-width: 540px) {
+  .version-banner { min-width: 0; width: calc(100vw - 1rem); }
+}
+
+.app-footer {
+  font-size: 8pt;
+  color: var(--muted);
+  text-align: center;
+  padding: 0.75rem 1rem 1rem;
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  letter-spacing: 0.02em;
+  user-select: text;
 }

@@ -6,6 +6,7 @@ interface Props {
   schedule?: Schedule;
   charging: boolean;
   mode: 'off' | 'schedule' | 'force';
+  pendingMode?: 'off' | 'schedule' | 'force';
   onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
   error?: string | null;
 }
@@ -48,7 +49,7 @@ function formatPower(watts: number): string {
   return `${watts.toFixed(0)} W`;
 }
 
-export function ChargerStatus({ chargePoints, schedule, charging, mode, onModeChange, error }: Props) {
+export function ChargerStatus({ chargePoints, schedule, charging, mode, pendingMode, onModeChange, error }: Props) {
   const { t } = useTranslation();
 
   const carStateLabelKeys: Record<CarState, Parameters<typeof t>[0]> = {
@@ -71,15 +72,19 @@ export function ChargerStatus({ chargePoints, schedule, charging, mode, onModeCh
       <div className="charger-top">
         <h2>{t('charger.heading')}</h2>
         <div className="mode-toggle">
-          {modes.map((m) => (
-            <button
-              key={m.value}
-              className={`mode-btn ${m.value} ${mode === m.value ? 'active' : ''}`}
-              onClick={() => onModeChange(m.value)}
-            >
-              {m.label}
-            </button>
-          ))}
+          {modes.map((m) => {
+            const isActive = mode === m.value;
+            const isPending = pendingMode != null && pendingMode === m.value && pendingMode !== mode;
+            return (
+              <button
+                key={m.value}
+                className={`mode-btn ${m.value} ${isActive ? 'active' : ''} ${isPending ? 'pending' : ''}`}
+                onClick={() => onModeChange(m.value)}
+              >
+                {m.label}
+              </button>
+            );
+          })}
         </div>
       </div>
       {error && <div className="mode-error">{error}</div>}

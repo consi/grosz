@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/consi/grosz/internal/events"
 )
 
 // DailyIdle holds the daily idle energy consumption and cost.
@@ -120,20 +122,10 @@ func (s *Store) SnapshotDailyIdle(day time.Time) error {
 		return err
 	}
 
-	_ = s.RecordSystemEvent(SystemEvent{
-		Timestamp: time.Now(),
-		Source:    "store",
-		Action:    "snapshot_daily_idle",
-		Level:     "info",
-		Input: map[string]any{
-			"date":    date,
-			"windows": len(windows),
-		},
-		Result: map[string]any{
-			"idleKWh":  idleKWh,
-			"idleCost": idleCost,
-		},
-	})
+	events.Info(s, events.SourceStore, events.ActionIdleSnapshotDaily,
+		map[string]any{"date": date, "windows": len(windows)},
+		map[string]any{"idleKWh": idleKWh, "idleCost": idleCost},
+	)
 	return nil
 }
 

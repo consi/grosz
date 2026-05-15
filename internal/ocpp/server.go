@@ -12,6 +12,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
 
@@ -27,6 +28,12 @@ type SoCUpdater func(energyKWh float64)
 // ConnectorStatusHook is called when a connector's status changes.
 type ConnectorStatusHook func(cpID string, connectorID int, status string)
 
+// TransactionEndedHook is called right after OnStopTransaction clears a
+// connector's txnID. Lets the scheduler react the moment the charger
+// confirms a stop, without waiting for the post-stop StatusNotification
+// (which can lag through cloud proxies) or for the next 30s control tick.
+type TransactionEndedHook func(cpID string, connectorID int, transactionID int)
+
 // Server wraps the OCPP 1.6 Central System.
 type Server struct {
 	cs        ocpp16.CentralSystem
@@ -38,11 +45,13 @@ type Server struct {
 	// in the connect handler.
 	realAddrs  map[string]string
 	store     *store.Store
+	events    *events.Bound
 	log       *slog.Logger
 	bootHooks  []BootHook
-	statusHook      StatusHook
-	socUpdater      SoCUpdater
-	connStatusHook  ConnectorStatusHook
+	statusHook         StatusHook
+	socUpdater         SoCUpdater
+	connStatusHook     ConnectorStatusHook
+	txnEndedHook       TransactionEndedHook
 	nextTxnID  atomic.Int64
 	lastPurge  time.Time
 }
@@ -70,6 +79,7 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 		points:    make(map[string]*ChargePoint),
 		realAddrs: make(map[string]string),
 		store:     st,
+		events:    events.For(events.SourceOCPP, st),
 		log:       log.With("component", "ocpp"),
 	}
 
@@ -125,10 +135,10 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 		s.log.Info("charge point connected", "id", id, "addr", addr)
 		s.fireStatusHook()
 		if s.store != nil {
-			_ = s.store.RecordSystemEvent(store.SystemEvent{
-				Timestamp: time.Now(), Source: "ocpp", Action: "chargerConnected",
-				Input: map[string]any{"cpID": id, "remoteAddr": addr},
-			})
+			s.events.Info(events.ActionChargerConnected,
+				map[string]any{"cpID": id, "remoteAddr": addr},
+				nil,
+			)
 		}
 	})
 
@@ -143,10 +153,10 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 		s.mu.Unlock()
 		s.fireStatusHook()
 		if s.store != nil {
-			_ = s.store.RecordSystemEvent(store.SystemEvent{
-				Timestamp: time.Now(), Source: "ocpp", Action: "chargerDisconnected",
-				Input: map[string]any{"cpID": id},
-			})
+			s.events.Info(events.ActionChargerDisconnected,
+				map[string]any{"cpID": id},
+				nil,
+			)
 		}
 	})
 
@@ -193,6 +203,14 @@ func (s *Server) SetConnectorStatusHook(hook ConnectorStatusHook) {
 	s.connStatusHook = hook
 }
 
+// SetTransactionEndedHook registers a callback fired right after a
+// StopTransaction clears a connector's txnID.
+func (s *Server) SetTransactionEndedHook(hook TransactionEndedHook) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.txnEndedHook = hook
+}
+
 func (s *Server) fireStatusHook() {
 	s.mu.RLock()
 	hook := s.statusHook
@@ -208,6 +226,15 @@ func (s *Server) fireConnectorStatusHook(cpID string, connectorID int, status st
 	s.mu.RUnlock()
 	if hook != nil {
 		go hook(cpID, connectorID, status)
+	}
+}
+
+func (s *Server) fireTransactionEndedHook(cpID string, connectorID, transactionID int) {
+	s.mu.RLock()
+	hook := s.txnEndedHook
+	s.mu.RUnlock()
+	if hook != nil {
+		go hook(cpID, connectorID, transactionID)
 	}
 }
 

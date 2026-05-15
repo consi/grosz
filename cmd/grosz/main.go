@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/meter"
 	"github.com/consi/grosz/internal/ocpp"
 	"github.com/consi/grosz/internal/scheduler"
@@ -32,6 +35,7 @@ var (
 var defaultSettings = map[string]string{
 	"auth.username":            "admin",
 	"auth.password":            "admin",
+	"auth.session_lifetime_days": "30",
 	"ocpp.port":                "8887",
 	"ocpp.path":                "/{ws}",
 	"ocpp.auth_key":            "",
@@ -96,7 +100,9 @@ func main() {
 	log := slog.New(handler)
 	slog.SetDefault(log)
 
-	log.Info("starting grosz", "version", version, "commit", commit, "db", dbPath)
+	bootID := generateBootID()
+	log.Info("starting grosz", "version", version, "commit", commit, "boot_id", bootID, "db", dbPath)
+	startedAt := time.Now()
 
 	// Open store
 	st, err := store.New(dbPath, log)
@@ -105,6 +111,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = st.Close() }()
+
+	events.Info(st, events.SourceApp, events.ActionAppStarted,
+		map[string]any{"version": version, "commit": commit, "bootID": bootID},
+		nil,
+	)
 
 	// Seed defaults on first run
 	if err := st.SeedDefaults(defaultSettings); err != nil {
@@ -162,7 +173,7 @@ func main() {
 	}
 
 	// Create web server
-	webSrv := web.New(srv, st, tp, sched, meterPoller, log)
+	webSrv := web.New(srv, st, tp, sched, meterPoller, bootID, version, commit, log)
 	webPort := st.GetInt("web.port", 3000)
 
 	// Wire up live SSE broadcasts
@@ -172,10 +183,24 @@ func main() {
 	if sched != nil {
 		srv.SetSoCUpdater(sched.UpdateSoC)
 		srv.SetConnectorStatusHook(func(cpID string, connectorID int, status string) {
+			// Every connector-status transition pokes the scheduler so post-stop
+			// "Available"/"Finishing" → "Preparing" sequences are picked up
+			// immediately. Recompute is cheap during an active transaction
+			// (early-return freeze) and otherwise short.
+			sched.NotifyImmediate()
+			// Renault poll is more expensive; keep it filtered to the
+			// transitions where a fresh SoC reading is most useful.
 			if status == "Preparing" || status == "SuspendedEV" {
-				sched.NotifyImmediate()
 				renaultPoller.Trigger()
 			}
+		})
+		// Defensive belt: a StopTransaction may arrive before any post-stop
+		// StatusNotification (or be relayed by the cloud proxy out of order).
+		// Notify the scheduler the instant txnID is cleared so a pending
+		// Force/Schedule mode change can attempt RemoteStart without waiting
+		// for the 30s control tick.
+		srv.SetTransactionEndedHook(func(cpID string, connectorID, txnID int) {
+			sched.NotifyImmediate()
 		})
 		sched.SetOnRecompute(webSrv.BroadcastStatus)
 	}
@@ -220,6 +245,10 @@ func main() {
 	sig := <-sigCh
 
 	log.Info("shutting down", "signal", sig)
+	events.Info(st, events.SourceApp, events.ActionAppShutdown,
+		map[string]any{"signal": sig.String(), "bootID": bootID},
+		map[string]any{"uptimeSec": int(time.Since(startedAt).Seconds())},
+	)
 	webSrv.Stop()
 	renaultPoller.Stop()
 	meterPoller.Stop()
@@ -237,4 +266,10 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func generateBootID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

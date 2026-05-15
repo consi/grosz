@@ -9,6 +9,7 @@ import { Sessions } from './components/Sessions';
 import { OcppLog } from './components/OcppLog';
 import { SystemLog } from './components/SystemLog';
 import { Settings } from './components/Settings';
+import { VersionUpdateBanner } from './components/VersionUpdateBanner';
 import { useSSE } from './hooks/useSSE';
 import { usePullToRefresh } from './hooks/usePullToRefresh';
 import { I18nProvider, useTranslation, browserLocale } from './i18n';
@@ -38,6 +39,9 @@ function App() {
   const [timezone, setTimezone] = useState<string>(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const [locale, setLocale] = useState<Locale>(browserLocale);
   const [defaultPowerW, setDefaultPowerW] = useState<number>(11000);
+  const initialBootIdRef = useRef<string | null>(null);
+  const [newVersionAvailable, setNewVersionAvailable] = useState(false);
+  const [versionInfo, setVersionInfo] = useState<{ version: string; commit: string; bootId: string } | null>(null);
 
   // Auth-aware fetch: redirects to login on 401
   const authedRef = useRef(authed);
@@ -53,15 +57,51 @@ function App() {
     });
   }, []);
 
-  // Check auth on mount
+  // Check auth on mount. Only treat 401 as "not authenticated"; transient
+  // proxy errors (502/503 during a deploy) and network errors must not kick
+  // the user — keep retrying until we get a definitive answer.
   useEffect(() => {
-    fetch('/api/auth/check')
-      .then(async (r) => {
-        const data = await r.json();
-        setAuthed(r.ok && data.authenticated);
-        setPasskeysAvailable(data.passkeys === true);
+    let cancelled = false;
+    const check = async (): Promise<void> => {
+      try {
+        const r = await fetch('/api/auth/check');
+        if (cancelled) return;
+        if (r.status === 401) {
+          setAuthed(false);
+          try { const data = await r.json(); setPasskeysAvailable(data.passkeys === true); } catch { /* ignore */ }
+          return;
+        }
+        if (r.ok) {
+          const data = await r.json();
+          setAuthed(data.authenticated === true);
+          setPasskeysAvailable(data.passkeys === true);
+          return;
+        }
+        // 5xx / non-2xx-non-401 — backend restarting; retry shortly.
+        setTimeout(check, 2000);
+      } catch {
+        if (cancelled) return;
+        setTimeout(check, 2000);
+      }
+    };
+    check();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Record the boot ID this client saw at load time; later mismatches trigger the
+  // "new version landed" banner.
+  useEffect(() => {
+    fetch('/api/version')
+      .then((r) => r.json())
+      .then((d) => {
+        if (typeof d?.bootId === 'string' && d.bootId) {
+          initialBootIdRef.current = d.bootId;
+        }
+        if (d && typeof d.version === 'string') {
+          setVersionInfo({ version: d.version, commit: d.commit ?? '', bootId: d.bootId ?? '' });
+        }
       })
-      .catch(() => setAuthed(false));
+      .catch(() => {});
   }, []);
 
   // Initial data fetch
@@ -104,6 +144,16 @@ function App() {
   useSSE(
     authed ? '/api/events/stream' : null,
     useCallback((event: string, data: string) => {
+      if (event === 'bootid') {
+        // Boot ID is a plain string, not JSON. If it differs from the one we saw
+        // at first page load → server was redeployed → prompt user to reload.
+        if (initialBootIdRef.current && data && data !== initialBootIdRef.current) {
+          setNewVersionAvailable(true);
+        } else if (!initialBootIdRef.current && data) {
+          initialBootIdRef.current = data;
+        }
+        return;
+      }
       try {
         const parsed = JSON.parse(data);
         if (event === 'status') setStatus(parsed);
@@ -149,8 +199,27 @@ function App() {
 
   const [modeError, setModeError] = useState<string | null>(null);
 
+  // Safety net: while a mode change is pending, schedule one refetch at
+  // (apply-time + 200ms grace). The SSE broadcast fired by applyPendingMode
+  // is the normal path; this guarantees the UI catches up even if SSE
+  // drops mid-window.
+  useEffect(() => {
+    if (!status.pendingMode || !status.pendingModeApplyAt) return;
+    const applyAt = Date.parse(status.pendingModeApplyAt);
+    if (Number.isNaN(applyAt)) return;
+    const delay = Math.max(0, applyAt - Date.now()) + 200;
+    const id = window.setTimeout(() => {
+      apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [status.pendingMode, status.pendingModeApplyAt, apiFetch]);
+
   const handleModeChange = async (mode: 'off' | 'schedule' | 'force') => {
-    setStatus((s) => ({ ...s, mode }));
+    // Server debounces 5s before applying. Optimistically mark the click
+    // as pending so the chosen button starts pulsing immediately; the
+    // applied mode stays on the previously selected button until the
+    // status refetch / SSE confirms the server has applied the change.
+    setStatus((s) => ({ ...s, pendingMode: mode }));
     setModeError(null);
     try {
       const resp = await apiFetch('/api/charger/mode', {
@@ -240,13 +309,19 @@ function App() {
   // Login screen
   if (!authed) return (
     <I18nProvider locale={locale}>
+      <DocumentTitle />
+      {newVersionAvailable && <VersionUpdateBanner />}
       <Login onLogin={() => setAuthed(true)} passkeysAvailable={passkeysAvailable} />
+      <AppFooter versionInfo={versionInfo} />
     </I18nProvider>
   );
 
   return (
     <I18nProvider locale={locale}>
+      <DocumentTitle />
+      {newVersionAvailable && <VersionUpdateBanner />}
       <AppContent
+        versionInfo={versionInfo}
         tab={tab} setTab={setTab}
         menuOpen={menuOpen} setMenuOpen={setMenuOpen}
         status={status} rates={rates} consumption={consumption}
@@ -274,7 +349,7 @@ function AppContent({
   timezone, locale, setLocale,
   pulling, pullDistance, refreshing,
   modeError, refreshKey,
-  defaultPowerW,
+  defaultPowerW, versionInfo,
   onModeChange, onScheduleApply, onScheduleCancel, onSlotCancel, onSlotRestore,
   onCreateOverride, onDeleteOverride, onLogout,
 }: {
@@ -286,6 +361,7 @@ function AppContent({
   pulling: boolean; pullDistance: number; refreshing: boolean;
   modeError: string | null; refreshKey: number;
   defaultPowerW: number;
+  versionInfo: { version: string; commit: string; bootId: string } | null;
   onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
   onScheduleApply: () => void; onScheduleCancel: () => void;
   onSlotCancel: (date: string) => void; onSlotRestore: (date: string) => void;
@@ -336,6 +412,7 @@ function AppContent({
                 schedule={status.schedule}
                 charging={status.charging}
                 mode={status.mode || 'schedule'}
+                pendingMode={status.pendingMode}
                 onModeChange={onModeChange}
                 error={modeError}
               />
@@ -379,8 +456,28 @@ function AppContent({
         {tab === 'syslog' && <SystemLog refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} />}
       </main>
+      <AppFooter versionInfo={versionInfo} />
     </div>
   );
+}
+
+function AppFooter({ versionInfo }: { versionInfo: { version: string; commit: string; bootId: string } | null }) {
+  const { t } = useTranslation();
+  if (!versionInfo) return null;
+  const shortBoot = versionInfo.bootId ? versionInfo.bootId.slice(0, 8) : '';
+  return (
+    <footer className="app-footer">
+      grosz — {t('login.subtitle')} {versionInfo.version} ({versionInfo.commit}/{shortBoot})
+    </footer>
+  );
+}
+
+function DocumentTitle() {
+  const { t } = useTranslation();
+  useEffect(() => {
+    document.title = `grosz — ${t('login.subtitle')}`;
+  }, [t]);
+  return null;
 }
 
 export default App;

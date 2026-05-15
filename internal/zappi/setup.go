@@ -3,10 +3,10 @@ package zappi
 import (
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/ocpp"
 	"github.com/consi/grosz/internal/store"
 )
@@ -73,11 +73,10 @@ func Setup(srv *ocpp.Server, cpID string, st *store.Store, log *slog.Logger) err
 	setConfig(KeyMeterValueSampleInterval, interval, "meter sample interval")
 
 	log.Info("Zappi setup complete")
-	_ = st.RecordSystemEvent(store.SystemEvent{
-		Timestamp: time.Now(), Source: "zappi", Action: "setup",
-		Input: map[string]any{"cpID": cpID},
-		Result: map[string]any{"configured": configured, "skipped": skipped},
-	})
+	events.Info(st, events.SourceZappi, events.ActionZappiSetup,
+		map[string]any{"cpID": cpID},
+		map[string]any{"configured": configured, "skipped": skipped},
+	)
 	return nil
 }
 
