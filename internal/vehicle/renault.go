@@ -20,14 +20,18 @@ import (
 // gigyaAPIKey and kamereonAPIKey are public reverse-engineered values extracted
 // from the official MyRenault mobile app. They identify the client to Gigya
 // (auth) and Kamereon (vehicle telemetry) and are required for any third-party
-// MyRenault integration. The same constants are used by python-renault-api,
-// the Home Assistant Renault integration, and other open-source projects in
-// this space. They are not user secrets.
+// MyRenault integration. They are not user secrets.
+//
+// In 2026 Renault migrated EU MyRenault auth from the shared public Gigya
+// tenant (accounts.eu1.gigya.com, key 3_2YBjydYRd1...) to their own Gigya
+// instance at gigya-prod-eu1.renaultgroup.com with API key 4_e9Jso4A_3lN8E33qSDMwHg.
+// Accounts created/migrated via the ID Connect portal no longer resolve on the
+// old tenant, so we use the new one here.
 const (
-	gigyaURL = "https://accounts.eu1.gigya.com"
+	gigyaURL = "https://gigya-prod-eu1.renaultgroup.com"
 
 	defaultKamereonURL = "https://api-wired-prod-1-euw1.wrd-aws.com"
-	gigyaAPIKey        = "3_2YBjydYRd1shr6bsZdrvA9z7owvSg3W5RHDYDp6AlatXw9hqx7nVoanRn8YGsBN8"
+	gigyaAPIKey        = "4_e9Jso4A_3lN8E33qSDMwHg"
 	kamereonAPIKey     = "YjkKtHmGfaceeuExUDKGxrLZGGvtVS0J"
 )
 
