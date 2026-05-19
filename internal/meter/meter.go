@@ -68,9 +68,9 @@ type Poller struct {
 	live             LiveState
 	onUpdate         func(LiveState)
 
-	energyOffset    float64 // cumulative offset added to raw meter values
-	lastEffective   float64 // last value we wrote to DB (post-offset)
-	energyInited    bool    // energy state loaded from settings/DB
+	energyOffset  float64 // cumulative offset added to raw meter values
+	lastEffective float64 // last value we wrote to DB (post-offset)
+	energyInited  bool    // energy state loaded from settings/DB
 
 	cancel context.CancelFunc
 }
@@ -265,6 +265,10 @@ func (p *Poller) poll(baseURL string) {
 	p.mu.RUnlock()
 
 	if sinceLastStore >= time.Minute {
+		// energy_wh column is kept for MeterDeltaKWh/SnapshotDailyIdle's
+		// recent-48h cost accounting. The dashboard chart and post-downtime
+		// idle rebuilds read from pstryk_consumption (Pstryk API) instead, so
+		// don't be tempted to drop this column thinking it's redundant.
 		reading := store.MeterReading{
 			Timestamp: time.Now(),
 			PowerW:    powerW,
@@ -303,8 +307,9 @@ func (p *Poller) poll(baseURL string) {
 		sinceLastSyslog := time.Since(p.lastSyslog)
 		p.mu.RUnlock()
 		if sinceLastSyslog >= time.Minute {
+			// energyWh flows via pstryk:fetchConsumption (authoritative source).
 			p.events.Info(events.ActionMeterPoll, nil,
-				map[string]any{"powerW": powerW, "energyWh": energyWh},
+				map[string]any{"powerW": powerW},
 			)
 			p.mu.Lock()
 			p.lastSyslog = time.Now()

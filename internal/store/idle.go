@@ -79,7 +79,35 @@ type TimeWindow struct {
 // For today (dayEnd in the future) the window is clipped to now, so partial-
 // day refreshes don't roll an empty tail into the calculation.
 func (s *Store) SnapshotDailyIdle(day time.Time) error {
-	date := day.Format("2006-01-02")
+	return s.computeDailyIdle(day, events.ActionIdleSnapshotDaily,
+		s.MeterReadingsCount, 2, s.MeterDeltaKWh)
+}
+
+// RebuildDailyIdle recomputes idle energy for a date using stored Pstryk
+// hourly consumption rather than the live meter. Used after a consumption
+// backfill (initial deploy or recovery from downtime) to heal any
+// daily_idle row that's missing or partial because the local meter wasn't
+// reachable. Idempotent — last writer wins via UpsertDailyIdle.
+func (s *Store) RebuildDailyIdle(day time.Time) error {
+	return s.computeDailyIdle(day, events.ActionRebuildDailyIdle,
+		s.PstrykRowsCount, 1, s.PstrykEnergyKWh)
+}
+
+// computeDailyIdle is the shared core of SnapshotDailyIdle (meter-sourced) and
+// RebuildDailyIdle (Pstryk-sourced). The two only differ in which table
+// supplies the "do we have data?" guard and the per-window energy delta.
+//
+// `minRows` is the threshold below which the snapshot is skipped to preserve
+// any earlier-written row (e.g. meter retention purge already trimmed the
+// readings, but the day was finalized before that).
+func (s *Store) computeDailyIdle(
+	day time.Time,
+	action events.Action,
+	rowCount func(start, end time.Time) (int, error),
+	minRows int,
+	energyKWh func(start, end time.Time) (float64, error),
+) error {
+	date := day.Format(time.DateOnly)
 	dayStart := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, day.Location())
 	dayEnd := dayStart.Add(24 * time.Hour)
 	now := time.Now()
@@ -90,13 +118,11 @@ func (s *Store) SnapshotDailyIdle(day time.Time) error {
 		return nil // future day, nothing to snapshot yet
 	}
 
-	// Skip when no meter data exists for this day at all — preserves any
-	// previous snapshot (e.g. an earlier day finalized before retention purge).
-	rowCount, err := s.MeterReadingsCount(dayStart, dayEnd)
+	n, err := rowCount(dayStart, dayEnd)
 	if err != nil {
-		return fmt.Errorf("meter rows for %s: %w", date, err)
+		return fmt.Errorf("source rows for %s: %w", date, err)
 	}
-	if rowCount < 2 {
+	if n < minRows {
 		return nil
 	}
 
@@ -107,7 +133,7 @@ func (s *Store) SnapshotDailyIdle(day time.Time) error {
 
 	var idleKWh, idleCost float64
 	for _, w := range windows {
-		delta, err := s.MeterDeltaKWh(w.Start, w.End)
+		delta, err := energyKWh(w.Start, w.End)
 		if err != nil {
 			return err
 		}
@@ -122,8 +148,8 @@ func (s *Store) SnapshotDailyIdle(day time.Time) error {
 		return err
 	}
 
-	events.Info(s, events.SourceStore, events.ActionIdleSnapshotDaily,
-		map[string]any{"date": date, "windows": len(windows)},
+	events.Info(s, events.SourceStore, action,
+		map[string]any{"date": date, "windows": len(windows), "sourceRows": n},
 		map[string]any{"idleKWh": idleKWh, "idleCost": idleCost},
 	)
 	return nil

@@ -199,6 +199,12 @@ func (s *Store) migrate() error {
 			user_agent TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at)`,
+
+		`CREATE TABLE IF NOT EXISTS pstryk_consumption (
+			hour       TEXT PRIMARY KEY,
+			energy_wh  REAL NOT NULL,
+			fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	for _, m := range migrations {

@@ -46,9 +46,18 @@ func (s *Store) PurgeMeterReadings(maxAge time.Duration) error {
 	return nil
 }
 
-// HourlyConsumption computes energy consumed per hour from cumulative readings.
-// Returns data for the last `hours` hours.
+// HourlyConsumption returns hourly consumption for the last `hours` hours.
+// Prefers Pstryk-sourced rows when present (long-term retention). Falls back
+// to aggregating the local meter_readings table when Pstryk has no data —
+// happens on fresh deploys, missing token, or repeated fetch failures.
 func (s *Store) HourlyConsumption(hours int) ([]HourlyEnergy, error) {
+	if pstryk, err := s.PstrykHourlyConsumption(hours); err == nil && len(pstryk) > 0 {
+		return pstryk, nil
+	}
+	return s.hourlyConsumptionFromMeter(hours)
+}
+
+func (s *Store) hourlyConsumptionFromMeter(hours int) ([]HourlyEnergy, error) {
 	since := time.Now().Add(-time.Duration(hours) * time.Hour).UTC().Format(time.RFC3339)
 
 	rows, err := s.db.Query(`

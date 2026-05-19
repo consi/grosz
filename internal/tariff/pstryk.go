@@ -27,30 +27,43 @@ type pstrykResponse struct {
 }
 
 type pstrykFrame struct {
-	Start   string        `json:"start"`
-	End     string        `json:"end"`
-	IsLive  bool          `json:"is_live"`
-	Metrics pstrykMetrics `json:"metrics"`
+	Start    string        `json:"start"`
+	End      string        `json:"end"`
+	IsLive   bool          `json:"is_live"`
+	Metrics  pstrykMetrics `json:"metrics"`
+	FaeUsage *float64      `json:"fae_usage"` // top-level kWh imported, present on meter_values responses
 }
 
 type pstrykMetrics struct {
-	Pricing *pstrykPricing `json:"pricing"`
+	Pricing     *pstrykPricing     `json:"pricing"`
+	MeterValues *pstrykMeterValues `json:"meter_values"`
 }
 
 type pstrykPricing struct {
 	PriceGross float64 `json:"price_gross"`
 }
 
+type pstrykMeterValues struct {
+	// EnergyActiveImportRegister is kWh imported during this frame.
+	EnergyActiveImportRegister *float64 `json:"energy_active_import_register"`
+}
+
 // Pstryk implements Provider for the Pstryk.pl API.
 type Pstryk struct {
-	store   *store.Store
-	events  *events.Bound
-	log     *slog.Logger
-	client  *http.Client
-	baseURL string
+	store        *store.Store
+	tariffEvents *events.Bound // SourceTariff — pricing events
+	pstrykEvents *events.Bound // SourcePstryk — consumption / backfill events
+	log          *slog.Logger
+	client       *http.Client
+	baseURL      string
 
 	mu    sync.RWMutex
 	rates []Rate
+
+	// noTokenWarnAt debounces the "token not configured" warn so an unconfigured
+	// instance doesn't spam the system log every tick. Reset to zero whenever a
+	// token IS present so a later misconfiguration warns once again.
+	noTokenWarnAt time.Time
 
 	cancel context.CancelFunc
 }
@@ -64,12 +77,13 @@ func NewPstryk(st *store.Store, log *slog.Logger) *Pstryk {
 func NewPstrykWithURL(st *store.Store, log *slog.Logger, baseURL string) *Pstryk {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Pstryk{
-		store:   st,
-		events:  events.For(events.SourceTariff, st),
-		log:     log.With("component", "tariff", "provider", pstrykName),
-		client:  &http.Client{Timeout: 30 * time.Second},
-		cancel:  cancel,
-		baseURL: baseURL,
+		store:        st,
+		tariffEvents: events.For(events.SourceTariff, st),
+		pstrykEvents: events.For(events.SourcePstryk, st),
+		log:          log.With("component", "tariff", "provider", pstrykName),
+		client:       &http.Client{Timeout: 30 * time.Second},
+		cancel:       cancel,
+		baseURL:      baseURL,
 	}
 
 	// Load cached rates from store
@@ -102,8 +116,11 @@ func (p *Pstryk) Stop() {
 }
 
 func (p *Pstryk) refreshLoop(ctx context.Context) {
-	// Fetch immediately
+	// Pricing is synchronous: the scheduler waits on `hasRates` below.
+	// Consumption backfill can be slow on cold-start (up to 48h of frames +
+	// idle rebuilds), so run it off the goroutine that owns the ticker.
 	p.fetchAndStore()
+	go p.fetchConsumptionAndStore()
 
 	// Use a short interval initially — once rates are loaded, switch to hourly
 	ticker := time.NewTicker(2 * time.Minute)
@@ -116,6 +133,7 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			p.fetchAndStore()
+			p.fetchConsumptionAndStore()
 
 			p.mu.RLock()
 			hasRates := len(p.rates) > 0
@@ -147,7 +165,7 @@ func (p *Pstryk) fetchAndStore() {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
 		p.log.Warn("pstryk token not configured, skipping fetch")
-		p.events.Warn(events.ActionFetchRates, nil,
+		p.tariffEvents.Warn(events.ActionFetchRates, nil,
 			map[string]any{"skipped": true, "reason": "token not configured"},
 		)
 		return
@@ -156,7 +174,7 @@ func (p *Pstryk) fetchAndStore() {
 	rates, err := p.fetch(token)
 	if err != nil {
 		p.log.Warn("failed to fetch rates", "err", err)
-		p.events.Error(events.ActionFetchRates, nil, err)
+		p.tariffEvents.Error(events.ActionFetchRates, nil, err)
 		return
 	}
 
@@ -164,7 +182,7 @@ func (p *Pstryk) fetchAndStore() {
 	beforeCount := len(rates)
 	rates = filterPlaceholders(rates)
 	if len(rates) < beforeCount {
-		p.events.Info(events.ActionFilterPlaceholders,
+		p.tariffEvents.Info(events.ActionFilterPlaceholders,
 			map[string]any{"beforeCount": beforeCount},
 			map[string]any{"afterCount": len(rates), "removed": beforeCount - len(rates)},
 		)
@@ -172,7 +190,7 @@ func (p *Pstryk) fetchAndStore() {
 
 	if len(rates) == 0 {
 		p.log.Warn("no valid rates returned")
-		p.events.Warn(events.ActionFetchRates, nil,
+		p.tariffEvents.Warn(events.ActionFetchRates, nil,
 			map[string]any{"error": "no valid rates returned"},
 		)
 		return
@@ -192,7 +210,7 @@ func (p *Pstryk) fetchAndStore() {
 		"from", rates[0].Start.Format(time.RFC3339),
 		"to", rates[len(rates)-1].End.Format(time.RFC3339),
 	)
-	p.events.Info(events.ActionFetchRates, nil,
+	p.tariffEvents.Info(events.ActionFetchRates, nil,
 		map[string]any{
 			"count": len(rates),
 			"from":  rates[0].Start.Format(time.RFC3339),
@@ -201,22 +219,14 @@ func (p *Pstryk) fetchAndStore() {
 	)
 }
 
-func (p *Pstryk) fetch(token string) ([]Rate, error) {
-	now := time.Now().UTC()
-	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	windowEnd := todayMidnight.Add(48 * time.Hour)
-
-	params := url.Values{}
-	params.Set("metrics", "pricing")
-	params.Set("resolution", "hour")
-	params.Set("window_start", todayMidnight.Format(time.RFC3339))
-	params.Set("window_end", windowEnd.Format(time.RFC3339))
-
+// unifiedMetrics issues a GET to the shared unified-metrics endpoint and
+// decodes the response. All Pstryk integration endpoints we use share auth,
+// rate-limit shape, and JSON envelope, so this centralizes the boilerplate.
+func (p *Pstryk) unifiedMetrics(token string, params url.Values) (*pstrykResponse, error) {
 	reqURL := fmt.Sprintf("%s/integrations/meter-data/unified-metrics/?%s", p.baseURL, params.Encode())
-
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Accept", "application/json")
@@ -238,6 +248,24 @@ func (p *Pstryk) fetch(token string) ([]Rate, error) {
 	var data pstrykResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &data, nil
+}
+
+func (p *Pstryk) fetch(token string) ([]Rate, error) {
+	now := time.Now().UTC()
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	windowEnd := todayMidnight.Add(48 * time.Hour)
+
+	params := url.Values{}
+	params.Set("metrics", "pricing")
+	params.Set("resolution", "hour")
+	params.Set("window_start", todayMidnight.Format(time.RFC3339))
+	params.Set("window_end", windowEnd.Format(time.RFC3339))
+
+	data, err := p.unifiedMetrics(token, params)
+	if err != nil {
+		return nil, err
 	}
 
 	var rates []Rate
@@ -261,6 +289,206 @@ func (p *Pstryk) fetch(token string) ([]Rate, error) {
 	}
 
 	return rates, nil
+}
+
+// FetchConsumption returns hourly consumption frames for [start, end). Uses
+// the same unified-metrics endpoint as pricing, but with metrics=meter_values.
+// Frames where neither fae_usage nor meter_values.energy_active_import_register
+// is populated are skipped. Empty result on success is fine — caller checks.
+func (p *Pstryk) FetchConsumption(start, end time.Time) ([]store.PstrykConsumption, error) {
+	token := p.store.GetDefault("tariff.pstryk_token", "")
+	if token == "" {
+		return nil, fmt.Errorf("pstryk token not configured")
+	}
+
+	params := url.Values{}
+	params.Set("metrics", "meter_values")
+	params.Set("resolution", "hour")
+	params.Set("window_start", start.UTC().Format(time.RFC3339))
+	params.Set("window_end", end.UTC().Format(time.RFC3339))
+	// `for_tz` is only valid for day/month/year resolutions per Pstryk's API
+	// (HTTP 400 otherwise). Frames come back with UTC offset markers anyway
+	// and we Truncate to UTC top-of-hour when keying, so we don't need it.
+
+	data, err := p.unifiedMetrics(token, params)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]store.PstrykConsumption, 0, len(data.Frames))
+	for _, f := range data.Frames {
+		hour, err := time.Parse(time.RFC3339, f.Start)
+		if err != nil {
+			continue
+		}
+		// Key on the UTC top-of-hour. for_tz handles local-time alignment on the
+		// API side; we still store UTC keys so DST transitions don't collide.
+		hour = hour.UTC().Truncate(time.Hour)
+		kWh, ok := extractFaeUsage(f)
+		if !ok {
+			continue
+		}
+		out = append(out, store.PstrykConsumption{
+			Hour:     hour,
+			EnergyWh: kWh * 1000,
+		})
+	}
+	return out, nil
+}
+
+// extractFaeUsage pulls per-frame imported energy (kWh) from either the
+// top-level fae_usage field (newer responses) or meter_values.energy_active_
+// import_register (older shape). Both have been observed in the wild via the
+// balgerion/ha_Pstryk integration; we accept either.
+func extractFaeUsage(f pstrykFrame) (float64, bool) {
+	if f.FaeUsage != nil {
+		return *f.FaeUsage, true
+	}
+	if f.Metrics.MeterValues != nil && f.Metrics.MeterValues.EnergyActiveImportRegister != nil {
+		return *f.Metrics.MeterValues.EnergyActiveImportRegister, true
+	}
+	return 0, false
+}
+
+const (
+	// consumptionBootstrap is the minimum amount of history we want in the
+	// table. fetchConsumptionAndStore reaches back this far when the table
+	// is empty OR when the earliest stored row doesn't cover the window.
+	consumptionBootstrap = 48 * time.Hour
+	// consumptionCap caps a single backfill cycle. If a longer gap exists
+	// (e.g., year-long outage), it's filled over multiple cycles. Also
+	// prevents runaway fetches when LatestPstrykHour returns something
+	// unexpectedly stale.
+	consumptionCap = 30 * 24 * time.Hour
+	// consumptionChunk is the per-request window. The pricing path uses 48h
+	// successfully; we go wider for consumption because it's pulled less
+	// often. Adjust if Pstryk returns 4xx for large windows.
+	consumptionChunk = 7 * 24 * time.Hour
+)
+
+// fetchConsumptionAndStore detects the gap between the latest stored hour and
+// now, pulls Pstryk consumption frames to fill it, upserts them, and triggers
+// a daily-idle rebuild for each affected date. Idempotent — returns quickly
+// when there's nothing new to fetch (steady state during normal operation).
+func (p *Pstryk) fetchConsumptionAndStore() {
+	token := p.store.GetDefault("tariff.pstryk_token", "")
+	if token == "" {
+		p.mu.Lock()
+		shouldWarn := time.Since(p.noTokenWarnAt) >= 24*time.Hour
+		if shouldWarn {
+			p.noTokenWarnAt = time.Now()
+		}
+		p.mu.Unlock()
+		if shouldWarn {
+			p.pstrykEvents.Warn(events.ActionFetchConsumption, nil,
+				map[string]any{"skipped": true, "reason": "token not configured"},
+			)
+		}
+		return
+	}
+	// Token present — clear the debounce so a later removal warns again.
+	p.mu.Lock()
+	p.noTokenWarnAt = time.Time{}
+	p.mu.Unlock()
+
+	now := time.Now().UTC()
+	// Pstryk only finalizes past hours; clamp to the previous top-of-hour.
+	until := now.Truncate(time.Hour)
+	desired := until.Add(-consumptionBootstrap)
+
+	// Bring the table up to `desired` if we don't already reach that far back;
+	// otherwise just fill the gap between the latest stored hour and now.
+	// This is what lets the bootstrap window grow (e.g. for a one-off deeper
+	// historical fetch) without first wiping the table.
+	since := desired
+	if earliest, ok := p.store.EarliestPstrykHour(); ok && !earliest.After(desired) {
+		if latest, ok := p.store.LatestPstrykHour(); ok {
+			since = latest.Add(time.Hour)
+		}
+	}
+	if floor := now.Add(-consumptionCap); since.Before(floor) {
+		since = floor
+	}
+	if !until.After(since) {
+		return // nothing to fetch
+	}
+
+	totalHours := 0
+	var totalWh float64
+	// Key on local-midnight time values so date math is consistent end-to-end
+	// (SnapshotDailyIdle/RebuildDailyIdle build dayStart from day.Location()).
+	// String-format/reparse round-trips were silently shifting dates by the
+	// UTC↔Warsaw offset for hours near midnight.
+	affectedDates := make(map[time.Time]struct{})
+
+	for chunkStart := since; chunkStart.Before(until); {
+		chunkEnd := chunkStart.Add(consumptionChunk)
+		if chunkEnd.After(until) {
+			chunkEnd = until
+		}
+		frames, err := p.FetchConsumption(chunkStart, chunkEnd)
+		if err != nil {
+			p.log.Warn("failed to fetch consumption", "err", err,
+				"from", chunkStart.Format(time.RFC3339),
+				"to", chunkEnd.Format(time.RFC3339),
+			)
+			p.pstrykEvents.Error(events.ActionFetchConsumption,
+				map[string]any{
+					"windowStart": chunkStart.Format(time.RFC3339),
+					"windowEnd":   chunkEnd.Format(time.RFC3339),
+				},
+				err,
+			)
+			return // bail; next tick will retry
+		}
+		if len(frames) > 0 {
+			if err := p.store.UpsertPstrykConsumption(frames); err != nil {
+				p.log.Warn("failed to upsert consumption", "err", err)
+				p.pstrykEvents.Error(events.ActionFetchConsumption, nil, err)
+				return
+			}
+			for _, f := range frames {
+				totalWh += f.EnergyWh
+				local := f.Hour.In(time.Local)
+				dayStart := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+				affectedDates[dayStart] = struct{}{}
+			}
+			totalHours += len(frames)
+		}
+		p.pstrykEvents.Info(events.ActionFetchConsumption,
+			map[string]any{
+				"windowStart": chunkStart.Format(time.RFC3339),
+				"windowEnd":   chunkEnd.Format(time.RFC3339),
+			},
+			map[string]any{"count": len(frames)},
+		)
+		chunkStart = chunkEnd
+	}
+
+	if totalHours == 0 {
+		return
+	}
+
+	rebuilt := make([]string, 0, len(affectedDates))
+	for day := range affectedDates {
+		if err := p.store.RebuildDailyIdle(day); err != nil {
+			p.log.Warn("failed to rebuild daily idle", "date", day.Format(time.DateOnly), "err", err)
+			continue
+		}
+		rebuilt = append(rebuilt, day.Format(time.DateOnly))
+	}
+
+	p.pstrykEvents.Info(events.ActionBackfillConsumption,
+		map[string]any{
+			"since": since.Format(time.RFC3339),
+			"until": until.Format(time.RFC3339),
+		},
+		map[string]any{
+			"hoursAdded":   totalHours,
+			"totalWh":      totalWh,
+			"datesRebuilt": rebuilt,
+		},
+	)
 }
 
 // filterPlaceholders detects and removes placeholder data for tomorrow.

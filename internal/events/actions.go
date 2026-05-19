@@ -56,6 +56,12 @@ const (
 	ActionFilterPlaceholders Action = "filterPlaceholders"
 )
 
+// pstryk
+const (
+	ActionFetchConsumption    Action = "fetchConsumption"
+	ActionBackfillConsumption Action = "backfillConsumption"
+)
+
 // renault
 const (
 	ActionRenaultPoll      Action = "poll"
@@ -78,15 +84,16 @@ const (
 
 // store
 const (
-	ActionIdleSnapshotDaily   Action = "idleSnapshotDaily"
-	ActionPurgeSystemEvents   Action = "purgeSystemEvents"
-	ActionPurgeOcppEvents     Action = "purgeOcppEvents"
-	ActionPurgeChartMarkers   Action = "purgeChartMarkers"
-	ActionPurgeMeterReadings  Action = "purgeMeterReadings"
-	ActionPurgePhaseReadings  Action = "purgePhaseReadings"
-	ActionPurgeOverrides      Action = "purgeOverrides"
-	ActionPurgeRates          Action = "purgeRates"
-	ActionPurgeWebSessions    Action = "purgeWebSessions"
+	ActionIdleSnapshotDaily  Action = "idleSnapshotDaily"
+	ActionRebuildDailyIdle   Action = "rebuildDailyIdle"
+	ActionPurgeSystemEvents  Action = "purgeSystemEvents"
+	ActionPurgeOcppEvents    Action = "purgeOcppEvents"
+	ActionPurgeChartMarkers  Action = "purgeChartMarkers"
+	ActionPurgeMeterReadings Action = "purgeMeterReadings"
+	ActionPurgePhaseReadings Action = "purgePhaseReadings"
+	ActionPurgeOverrides     Action = "purgeOverrides"
+	ActionPurgeRates         Action = "purgeRates"
+	ActionPurgeWebSessions   Action = "purgeWebSessions"
 )
 
 // zappi

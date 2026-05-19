@@ -262,6 +262,136 @@ func TestSnapshotDailyIdle_CostMatchesPerWindowSum(t *testing.T) {
 	assert.InDelta(t, 19.5, rows[0].Cost, 1.0)
 }
 
+// seedPstryk inserts hourly pstryk_consumption rows starting at `day` with a
+// constant per-hour Wh value. Mirrors seedMeter but for the new backfill path.
+func seedPstryk(t *testing.T, s *Store, day time.Time, hours int, perHourWh float64) {
+	t.Helper()
+	frames := make([]PstrykConsumption, hours)
+	for i := 0; i < hours; i++ {
+		frames[i] = PstrykConsumption{
+			Hour:     day.Add(time.Duration(i) * time.Hour),
+			EnergyWh: perHourWh,
+		}
+	}
+	require.NoError(t, s.UpsertPstrykConsumption(frames))
+}
+
+func TestRebuildDailyIdle_NoPstrykPreservesExisting(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	require.NoError(t, s.UpsertDailyIdle("2026-04-15", 9.9, 5.5))
+
+	require.NoError(t, s.RebuildDailyIdle(day))
+
+	rows, err := s.DailyIdleByDateRange(day, day.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.InDelta(t, 9.9, rows[0].EnergyKWh, 0.001)
+	assert.InDelta(t, 5.5, rows[0].Cost, 0.001)
+}
+
+func TestRebuildDailyIdle_FullDayNoSessions(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
+	seedPstryk(t, s, day, 24, 500) // 500 Wh/hour → 12 kWh/day
+
+	require.NoError(t, s.RebuildDailyIdle(day))
+
+	rows, err := s.DailyIdleByDateRange(day, day.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.InDelta(t, 12.0, rows[0].EnergyKWh, 0.01)
+	assert.Greater(t, rows[0].Cost, 0.0)
+}
+
+func TestRebuildDailyIdle_PartialDaySession(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
+	seedPstryk(t, s, day, 24, 1000) // 1 kWh/hour, 24 kWh total
+
+	// Session 06:00-12:00 — six hours.
+	require.NoError(t, s.StartSession(Session{
+		ChargeBox: "CP", ConnectorID: 1, TransactionID: 1,
+		StartTime: day.Add(6 * time.Hour),
+	}))
+	require.NoError(t, s.StopSession(1, day.Add(12*time.Hour), 6, 6, 6))
+
+	require.NoError(t, s.RebuildDailyIdle(day))
+
+	rows, err := s.DailyIdleByDateRange(day, day.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	// Non-charging windows: 6h + 12h = 18h × 1 kWh = 18 kWh.
+	assert.InDelta(t, 18.0, rows[0].EnergyKWh, 0.01)
+}
+
+func TestRebuildDailyIdle_OverwritesPartialSnapshot(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
+
+	// Stale snapshot from before downtime — only 3 kWh recorded.
+	require.NoError(t, s.UpsertDailyIdle("2026-04-15", 3.0, 1.5))
+
+	// Pstryk backfill brought in the full day's data.
+	seedPstryk(t, s, day, 24, 1000) // 24 kWh
+
+	require.NoError(t, s.RebuildDailyIdle(day))
+
+	rows, err := s.DailyIdleByDateRange(day, day.Add(24*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.InDelta(t, 24.0, rows[0].EnergyKWh, 0.01,
+		"rebuild must replace partial snapshot, not add to it")
+}
+
+func TestPstrykEnergyKWh_PartialHourProrated(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	// Two consecutive hours, 1000 Wh each.
+	require.NoError(t, s.UpsertPstrykConsumption([]PstrykConsumption{
+		{Hour: day, EnergyWh: 1000},
+		{Hour: day.Add(time.Hour), EnergyWh: 1000},
+	}))
+
+	// Half of the first hour and full second hour: 0.5 + 1.0 = 1.5 kWh.
+	got, err := s.PstrykEnergyKWh(day.Add(30*time.Minute), day.Add(2*time.Hour))
+	require.NoError(t, err)
+	assert.InDelta(t, 1.5, got, 0.001)
+}
+
+func TestHourlyConsumption_PrefersPstryk(t *testing.T) {
+	s := testStore(t)
+	day := fixedDay()
+	// Both sources populated; pstryk should win.
+	seedMeter(t, s, day, 0, 23000) // would yield ~1 kWh/hour deltas
+	require.NoError(t, s.UpsertPstrykConsumption([]PstrykConsumption{
+		{Hour: time.Now().UTC().Truncate(time.Hour).Add(-time.Hour), EnergyWh: 555},
+	}))
+
+	got, err := s.HourlyConsumption(48)
+	require.NoError(t, err)
+	require.NotEmpty(t, got)
+	// Exact value match confirms it came from pstryk, not the meter ramp.
+	assert.InDelta(t, 555.0, got[0].EnergyWh, 0.01)
+	assert.InDelta(t, 555.0, got[0].PowerW, 0.01, "powerW equals Wh for hourly buckets")
+}
+
+func TestHourlyConsumption_FallsBackToMeter(t *testing.T) {
+	s := testStore(t)
+	// Use today so the 48h cutoff in HourlyConsumption keeps the rows visible.
+	now := time.Now().UTC().Truncate(time.Hour)
+	day := now.Add(-12 * time.Hour)
+	seedMeter(t, s, day, 0, 12000) // 12h ramp; some readings fall within last 48h
+
+	// No pstryk_consumption rows — fall back to aggregating meter_readings.
+	got, err := s.HourlyConsumption(48)
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "meter fallback should produce hourly rows")
+}
+
 func TestNonChargingWindows_InversionMath(t *testing.T) {
 	// Direct unit test of the helper — gives us precise coverage on the
 	// merge/invert edge cases without going through SQL.
