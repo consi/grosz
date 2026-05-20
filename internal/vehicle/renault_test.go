@@ -152,31 +152,6 @@ func TestPollStoresAllFields(t *testing.T) {
 	assert.Equal(t, "2026-04-25T10:00:00Z", st.GetDefault("vehicle.battery_timestamp", ""))
 }
 
-func TestPollErrorClearsFields(t *testing.T) {
-	st := testStore(t)
-
-	_ = st.Set("scheduler.current_soc", "72")
-	_ = st.Set("vehicle.plug_status", "1")
-	_ = st.Set("vehicle.battery_autonomy", "185")
-	_ = st.Set("vehicle.charging_status", "1")
-	_ = st.Set("vehicle.charging_remaining_time", "90")
-	_ = st.Set("vehicle.battery_timestamp", "2026-04-25T10:00:00Z")
-
-	_ = st.Set("scheduler.current_soc", "0")
-	_ = st.Set("vehicle.plug_status", "")
-	_ = st.Set("vehicle.battery_autonomy", "")
-	_ = st.Set("vehicle.charging_status", "")
-	_ = st.Set("vehicle.charging_remaining_time", "")
-	_ = st.Set("vehicle.battery_timestamp", "")
-
-	assert.Equal(t, 0, st.GetInt("scheduler.current_soc", -1))
-	assert.Equal(t, "", st.GetDefault("vehicle.plug_status", "x"))
-	assert.Equal(t, "", st.GetDefault("vehicle.battery_autonomy", "x"))
-	assert.Equal(t, "", st.GetDefault("vehicle.charging_status", "x"))
-	assert.Equal(t, "", st.GetDefault("vehicle.charging_remaining_time", "x"))
-	assert.Equal(t, "", st.GetDefault("vehicle.battery_timestamp", "x"))
-}
-
 func TestShouldRefreshDetails(t *testing.T) {
 	st := testStore(t)
 	r := testRenault(t, st, "http://unused")

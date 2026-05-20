@@ -137,27 +137,22 @@ func (r *Renault) loop(ctx context.Context) {
 		}
 
 		if err := r.poll(user, pass, vin); err != nil {
+			// Preserve the last successful SoC, plug status, etc. A transient
+			// poll failure (e.g. one-minute Gigya hiccup) used to reset SoC to
+			// 0, which made the scheduler plan a panic-sized slot anchored at
+			// the current expensive hour; the merge logic then preserved that
+			// pulled-back start even after SoC recovered. Leaving the store
+			// untouched lets the next successful poll overwrite naturally,
+			// and the existing plug-check stale_data guard already handles
+			// prolonged outages.
 			r.log.Warn("renault poll failed", "err", err)
-			// Reset SoC to 0 so scheduler assumes full charge needed
-			_ = r.store.Set("scheduler.current_soc", "0")
-			_ = r.store.Set("vehicle.plug_status", "")
-			_ = r.store.Set("vehicle.battery_autonomy", "")
-			_ = r.store.Set("vehicle.charging_status", "")
-			_ = r.store.Set("vehicle.charging_remaining_time", "")
-			_ = r.store.Set("vehicle.battery_timestamp", "")
-			r.mu.RLock()
-			cb := r.onUpdate
-			r.mu.RUnlock()
-			if cb != nil {
-				cb(0)
-			}
 			vinSuffix := vin
 			if len(vinSuffix) > 4 {
 				vinSuffix = vinSuffix[len(vinSuffix)-4:]
 			}
 			r.events.Warn(events.ActionRenaultPoll,
 				map[string]any{"vin": vinSuffix},
-				map[string]any{"error": err.Error(), "socReset": true},
+				map[string]any{"error": err.Error(), "socPreserved": true},
 			)
 		}
 
