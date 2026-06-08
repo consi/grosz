@@ -78,6 +78,15 @@ export interface StatusResponse {
   vehicleModel?: string;
   vehiclePicture?: string;
   mileage?: number;
+  renaultTfaRequired?: boolean;
+}
+
+export interface RenaultTfaStatus {
+  configured: boolean;
+  required: boolean;
+  pending: boolean;
+  obfuscatedEmail?: string;
+  completedAt?: string;
 }
 
 export interface MeterLive {

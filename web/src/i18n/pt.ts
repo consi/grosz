@@ -229,6 +229,25 @@ const pt: Translations = {
 
   'version.newVersion': 'Foi implementada uma nova versão',
   'version.reload': 'Recarregar aplicação',
+
+  // Renault TFA verification
+  'renault.tfa': 'Verificação MyRenault',
+  'renault.tfaIntro': 'A MyRenault requer verificação por e-mail. Envie um código e, em seguida, introduza-o abaixo para autorizar este dispositivo por cerca de 30 dias.',
+  'renault.tfaNotConfigured': 'Introduza o seu e-mail e palavra-passe MyRenault acima e guarde antes de verificar.',
+  'renault.tfaVerified': 'Verificado',
+  'renault.tfaLastVerified': 'Última verificação {date}',
+  'renault.tfaRequired': 'Verificação necessária',
+  'renault.tfaSendCode': 'Enviar código',
+  'renault.tfaSending': 'A enviar…',
+  'renault.tfaResend': 'Reenviar código',
+  'renault.tfaCodeSent': 'Código enviado para {email}. Introduza-o abaixo.',
+  'renault.tfaAlreadyAuthed': 'Dispositivo já autorizado — não é necessário código.',
+  'renault.tfaCodePlaceholder': 'Código de 6 dígitos',
+  'renault.tfaVerify': 'Verificar',
+  'renault.tfaVerifying': 'A verificar…',
+  'renault.tfaSuccess': 'Verificado. Consulta MyRenault retomada.',
+  'renault.reauthBanner': 'MyRenault precisa de nova verificação',
+  'renault.reauthFix': 'Verificar',
 };
 
 export default pt;

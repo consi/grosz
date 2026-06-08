@@ -10,6 +10,7 @@ import { OcppLog } from './components/OcppLog';
 import { SystemLog } from './components/SystemLog';
 import { Settings } from './components/Settings';
 import { VersionUpdateBanner } from './components/VersionUpdateBanner';
+import { RenaultReauthBanner } from './components/RenaultReauthBanner';
 import { useSSE } from './hooks/useSSE';
 import { usePullToRefresh } from './hooks/usePullToRefresh';
 import { I18nProvider, useTranslation, browserLocale } from './i18n';
@@ -42,6 +43,12 @@ function App() {
   const initialBootIdRef = useRef<string | null>(null);
   const [newVersionAvailable, setNewVersionAvailable] = useState(false);
   const [versionInfo, setVersionInfo] = useState<{ version: string; commit: string; bootId: string } | null>(null);
+  const [renaultTfaAutoStart, setRenaultTfaAutoStart] = useState(false);
+
+  const handleRenaultReauth = useCallback(() => {
+    setTab('settings');
+    setRenaultTfaAutoStart(true);
+  }, []);
 
   // Auth-aware fetch: redirects to login on 401
   const authedRef = useRef(authed);
@@ -320,9 +327,12 @@ function App() {
     <I18nProvider locale={locale}>
       <DocumentTitle />
       {newVersionAvailable && <VersionUpdateBanner />}
+      {status.renaultTfaRequired && <RenaultReauthBanner onFix={handleRenaultReauth} />}
       <AppContent
         versionInfo={versionInfo}
         tab={tab} setTab={setTab}
+        renaultTfaAutoStart={renaultTfaAutoStart}
+        onRenaultTfaAutoStartConsumed={() => setRenaultTfaAutoStart(false)}
         menuOpen={menuOpen} setMenuOpen={setMenuOpen}
         status={status} rates={rates} consumption={consumption}
         meterLive={meterLive} chartMarkers={chartMarkers}
@@ -350,6 +360,7 @@ function AppContent({
   pulling, pullDistance, refreshing,
   modeError, refreshKey,
   defaultPowerW, versionInfo,
+  renaultTfaAutoStart, onRenaultTfaAutoStartConsumed,
   onModeChange, onScheduleApply, onScheduleCancel, onSlotCancel, onSlotRestore,
   onCreateOverride, onDeleteOverride, onLogout,
 }: {
@@ -362,6 +373,7 @@ function AppContent({
   modeError: string | null; refreshKey: number;
   defaultPowerW: number;
   versionInfo: { version: string; commit: string; bootId: string } | null;
+  renaultTfaAutoStart: boolean; onRenaultTfaAutoStartConsumed: () => void;
   onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
   onScheduleApply: () => void; onScheduleCancel: () => void;
   onSlotCancel: (date: string) => void; onSlotRestore: (date: string) => void;
@@ -454,7 +466,7 @@ function AppContent({
         {tab === 'reporting' && <Sessions refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'log' && <OcppLog refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'syslog' && <SystemLog refreshKey={refreshKey} timezone={timezone} />}
-        {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} />}
+        {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} renaultTfaAutoStart={renaultTfaAutoStart} onRenaultTfaAutoStartConsumed={onRenaultTfaAutoStartConsumed} />}
       </main>
       <AppFooter versionInfo={versionInfo} />
     </div>

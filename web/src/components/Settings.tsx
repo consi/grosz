@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { PasskeyManager } from './PasskeyManager';
 import { useTranslation, locales } from '../i18n';
 import type { Locale, TranslationKey } from '../i18n';
+import type { RenaultTfaStatus } from '../types';
 
 interface SettingGroup {
   titleKey: TranslationKey;
@@ -102,7 +103,7 @@ const groups: SettingGroup[] = [
   },
 ];
 
-export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void }) {
+export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoStart, onRenaultTfaAutoStartConsumed }: { refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void; renaultTfaAutoStart?: boolean; onRenaultTfaAutoStartConsumed?: () => void }) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Record<string, string>>({});
@@ -200,6 +201,13 @@ export function Settings({ refreshKey, locale, onLocaleChange }: { refreshKey?: 
               )}
             </label>
           ))}
+          {g.titleKey === 'settings.vehicle' && (
+            <RenaultTfaSection
+              refreshKey={refreshKey}
+              autoStart={renaultTfaAutoStart}
+              onAutoStartConsumed={onRenaultTfaAutoStartConsumed}
+            />
+          )}
         </fieldset>
         {g.titleKey === 'settings.charger' && (
           <MaintenanceSection cpID={getValue('zappi.charge_box_id')} />
@@ -326,5 +334,150 @@ function MaintenanceSection({ cpID }: { cpID: string }) {
         </div>
       )}
     </fieldset>
+  );
+}
+
+function RenaultTfaSection({ refreshKey, autoStart, onAutoStartConsumed }: { refreshKey?: number; autoStart?: boolean; onAutoStartConsumed?: () => void }) {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<RenaultTfaStatus | null>(null);
+  const [phase, setPhase] = useState<'idle' | 'sending' | 'codeSent' | 'verifying'>('idle');
+  const [code, setCode] = useState('');
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const autoStartedRef = useRef(false);
+
+  const loadStatus = () => {
+    fetch('/api/renault/tfa/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s: RenaultTfaStatus | null) => { if (s) setStatus(s); })
+      .catch(() => {});
+  };
+
+  useEffect(loadStatus, [refreshKey]);
+
+  const sendCode = async () => {
+    setPhase('sending');
+    setMsg(null);
+    try {
+      const resp = await fetch('/api/renault/tfa/start', { method: 'POST' });
+      if (!resp.ok) {
+        const text = await resp.text();
+        setMsg({ kind: 'err', text: text.trim() || t('renault.tfaSendCode') });
+        setPhase('idle');
+        return;
+      }
+      const data = await resp.json();
+      if (data.alreadyAuthenticated) {
+        setMsg({ kind: 'ok', text: t('renault.tfaAlreadyAuthed') });
+        setPhase('idle');
+        loadStatus();
+        return;
+      }
+      setPhase('codeSent');
+      setMsg({ kind: 'ok', text: t('renault.tfaCodeSent', { email: data.obfuscatedEmail || '' }) });
+    } catch (e) {
+      setMsg({ kind: 'err', text: (e as Error).message });
+      setPhase('idle');
+    }
+  };
+
+  const verify = async () => {
+    const trimmed = code.trim();
+    if (!trimmed) return;
+    setPhase('verifying');
+    setMsg(null);
+    try {
+      const resp = await fetch('/api/renault/tfa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: trimmed }),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        setMsg({ kind: 'err', text: text.trim() || t('renault.tfaVerify') });
+        setPhase('codeSent');
+        return;
+      }
+      setMsg({ kind: 'ok', text: t('renault.tfaSuccess') });
+      setCode('');
+      setPhase('idle');
+      loadStatus();
+    } catch (e) {
+      setMsg({ kind: 'err', text: (e as Error).message });
+      setPhase('codeSent');
+    }
+  };
+
+  // When the user arrives via the re-auth banner, scroll to the verification
+  // controls and kick off the code request once.
+  useEffect(() => {
+    if (!autoStart) return;
+    document.getElementById('renault-verification')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (status == null) return; // wait until we know whether Renault is configured
+    if (!autoStartedRef.current && status.configured) {
+      autoStartedRef.current = true;
+      sendCode();
+    }
+    onAutoStartConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, status]);
+
+  const configured = status?.configured ?? false;
+  const busy = phase === 'sending' || phase === 'verifying';
+
+  return (
+    <div id="renault-verification" className="renault-tfa">
+      <div className="setting-subheading">{t('renault.tfa')}</div>
+      {!configured ? (
+        <div className="msg">{t('renault.tfaNotConfigured')}</div>
+      ) : (
+        <>
+          <div className="setting-row">
+            <span>
+              {status?.required
+                ? t('renault.tfaRequired')
+                : status?.completedAt
+                  ? t('renault.tfaLastVerified', { date: new Date(status.completedAt).toLocaleString() })
+                  : t('renault.tfaVerified')}
+            </span>
+            <button
+              className="btn primary btn-sm"
+              disabled={busy}
+              onClick={sendCode}
+            >
+              {phase === 'sending'
+                ? t('renault.tfaSending')
+                : phase === 'codeSent' || phase === 'verifying'
+                  ? t('renault.tfaResend')
+                  : t('renault.tfaSendCode')}
+            </button>
+          </div>
+          {(phase === 'codeSent' || phase === 'verifying') && (
+            <div className="setting-row">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={8}
+                placeholder={t('renault.tfaCodePlaceholder')}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+              <button
+                className="btn primary btn-sm"
+                disabled={phase === 'verifying' || !code.trim()}
+                onClick={verify}
+              >
+                {phase === 'verifying' ? t('renault.tfaVerifying') : t('renault.tfaVerify')}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+      {msg && (
+        <div className="msg" style={{ color: msg.kind === 'err' ? 'var(--danger)' : undefined }}>
+          {msg.text}
+        </div>
+      )}
+    </div>
   );
 }

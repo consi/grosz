@@ -229,6 +229,25 @@ const lv: Translations = {
 
   'version.newVersion': 'Tika izvietota jauna versija',
   'version.reload': 'P\u0101rl\u0101d\u0113t lietotni',
+
+  // Renault TFA verification
+  'renault.tfa': 'MyRenault verifikācija',
+  'renault.tfaIntro': 'MyRenault pieprasa e-pasta verifikāciju. Nosūtiet kodu un pēc tam ievadiet to zemāk, lai autorizētu šo ierīci uz aptuveni 30 dienām.',
+  'renault.tfaNotConfigured': 'Ievadiet savu MyRenault e-pastu un paroli augstāk un saglabājiet pirms verifikācijas.',
+  'renault.tfaVerified': 'Verificēts',
+  'renault.tfaLastVerified': 'Pēdējoreiz verificēts {date}',
+  'renault.tfaRequired': 'Nepieciešama verifikācija',
+  'renault.tfaSendCode': 'Nosūtīt kodu',
+  'renault.tfaSending': 'Sūta…',
+  'renault.tfaResend': 'Nosūtīt kodu vēlreiz',
+  'renault.tfaCodeSent': 'Kods nosūtīts uz {email}. Ievadiet to zemāk.',
+  'renault.tfaAlreadyAuthed': 'Ierīce jau autorizēta — kods nav nepieciešams.',
+  'renault.tfaCodePlaceholder': '6 ciparu kods',
+  'renault.tfaVerify': 'Verificēt',
+  'renault.tfaVerifying': 'Verificē…',
+  'renault.tfaSuccess': 'Verificēts. MyRenault aptauja atsākta.',
+  'renault.reauthBanner': 'MyRenault nepieciešama atkārtota verifikācija',
+  'renault.reauthFix': 'Verificēt',
 };
 
 export default lv;

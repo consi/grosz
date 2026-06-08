@@ -19,6 +19,7 @@ import (
 	"github.com/consi/grosz/internal/scheduler"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
+	"github.com/consi/grosz/internal/vehicle"
 )
 
 //go:embed dist/*
@@ -34,6 +35,7 @@ type Server struct {
 	tariff    tariff.Provider
 	scheduler *scheduler.Scheduler
 	meter     *meter.Poller
+	renault   *vehicle.Renault
 	sse       *SSEBroker
 	log       *slog.Logger
 
@@ -45,7 +47,7 @@ type Server struct {
 }
 
 // New creates a new web server.
-func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, bootID, version, commit string, log *slog.Logger) *Server {
+func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, rp *vehicle.Renault, bootID, version, commit string, log *slog.Logger) *Server {
 	sseBroker := NewSSEBroker(log)
 	sseBroker.SetBootID(bootID)
 
@@ -57,6 +59,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 		tariff:     tp,
 		scheduler:  sched,
 		meter:      mp,
+		renault:    rp,
 		sse:        sseBroker,
 		log:        log.With("component", "web"),
 		bootID:     bootID,
@@ -123,6 +126,9 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("GET /api/settings", s.requireAuth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.requireAuth(s.handlePutSettings))
 	mux.HandleFunc("GET /api/vehicle/image", s.handleVehicleImage)
+	mux.HandleFunc("GET /api/renault/tfa/status", s.requireAuth(s.handleRenaultTFAStatus))
+	mux.HandleFunc("POST /api/renault/tfa/start", s.requireAuth(s.handleRenaultTFAStart))
+	mux.HandleFunc("POST /api/renault/tfa/verify", s.requireAuth(s.handleRenaultTFAVerify))
 
 	// Static files (SPA)
 	staticFS, err := fs.Sub(staticFiles, "dist")
@@ -226,6 +232,7 @@ func (s *Server) buildStatus() any {
 		VehicleModel          string                    `json:"vehicleModel,omitempty"`
 		VehiclePicture        string                    `json:"vehiclePicture,omitempty"`
 		Mileage               float64                   `json:"mileage"`
+		RenaultTfaRequired    bool                      `json:"renaultTfaRequired"`
 	}
 
 	result := make([]cpInfo, 0)
@@ -318,6 +325,7 @@ func (s *Server) buildStatus() any {
 		VehicleModel:          s.store.GetDefault("vehicle.model_name", ""),
 		VehiclePicture:        vehiclePicture,
 		Mileage:               mileage,
+		RenaultTfaRequired:    s.store.GetBool("vehicle.renault_tfa_required", false),
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -28,12 +29,36 @@ import (
 // Accounts created/migrated via the ID Connect portal no longer resolve on the
 // old tenant, so we use the new one here.
 const (
-	gigyaURL = "https://gigya-prod-eu1.renaultgroup.com"
+	defaultGigyaURL = "https://gigya-prod-eu1.renaultgroup.com"
 
 	defaultKamereonURL = "https://api-wired-prod-1-euw1.wrd-aws.com"
 	gigyaAPIKey        = "4_e9Jso4A_3lN8E33qSDMwHg"
 	kamereonAPIKey     = "YjkKtHmGfaceeuExUDKGxrLZGGvtVS0J"
 )
+
+// gigyaErrPendingTFA is the Gigya error code returned by accounts.login when
+// the account has mandatory two-factor auth enabled and this device/session is
+// not yet trusted. The response also carries a regToken used to drive the
+// email-code completion flow (see renault_tfa.go).
+const gigyaErrPendingTFA = 403101
+
+// gigyaError is a structured Gigya API error (errorCode != 0). It lets callers
+// distinguish a definitive API-level rejection (e.g. an invalid login_token, or
+// pending TFA) from a transport error, and carries the regToken when present.
+type gigyaError struct {
+	op       string
+	code     int
+	message  string
+	details  string // Gigya errorDetails — names the offending parameter on 400006
+	regToken string
+}
+
+func (e *gigyaError) Error() string {
+	if e.details != "" {
+		return fmt.Sprintf("gigya %s: %s: %s (code %d)", e.op, e.message, e.details, e.code)
+	}
+	return fmt.Sprintf("gigya %s: %s (code %d)", e.op, e.message, e.code)
+}
 
 // CockpitStatus holds the vehicle's cockpit data (odometer).
 type CockpitStatus struct {
@@ -57,9 +82,12 @@ type Renault struct {
 	log         *slog.Logger
 	client      *http.Client
 	kamereonURL string
+	gigyaURL    string
 
 	mu               sync.RWMutex
-	session          string // Gigya session token
+	session          string // Gigya session token (login_token), persisted
+	gmid             string // Gigya trusted-device id, persisted
+	ucid             string // Gigya client id, persisted
 	jwt              string
 	personID         string
 	accountID        string
@@ -67,6 +95,7 @@ type Renault struct {
 	last             *BatteryStatus
 	onUpdate         func(int) // called with SoC on successful poll
 	detailsFetchedAt time.Time
+	tfa              *tfaPending // in-flight TFA verification, if any
 
 	cancel    context.CancelFunc
 	triggerCh chan struct{}
@@ -86,9 +115,16 @@ func NewRenaultWithURL(st *store.Store, log *slog.Logger, kamereonURL string) *R
 		log:         log.With("component", "renault"),
 		client:      &http.Client{Timeout: 15 * time.Second},
 		kamereonURL: kamereonURL,
+		gigyaURL:    defaultGigyaURL,
 		cancel:      cancel,
 		triggerCh:   make(chan struct{}, 1),
 	}
+	// Restore the durable Gigya credentials so a restart reuses the existing
+	// login_token (and trusted device) instead of re-running accounts.login —
+	// which, under Renault's mandatory TFA, would force a fresh email-code flow.
+	r.session = st.GetDefault("vehicle.renault_session", "")
+	r.gmid = st.GetDefault("vehicle.renault_gmid", "")
+	r.ucid = st.GetDefault("vehicle.renault_ucid", "")
 	go r.loop(ctx)
 	return r
 }
@@ -252,6 +288,11 @@ func (r *Renault) poll(user, pass, vin string) error {
 		},
 	)
 
+	// A successful poll proves auth is healthy — clear any stale TFA flag.
+	if r.store.GetBool("vehicle.renault_tfa_required", false) {
+		_ = r.store.Set("vehicle.renault_tfa_required", "false")
+	}
+
 	return nil
 }
 
@@ -273,11 +314,19 @@ func (r *Renault) ensureAuth(user, pass string) error {
 	if !hasSession {
 		session, err := r.gigyaLogin(user, pass)
 		if err != nil {
+			// A 403101 means the account now requires TFA and this device is
+			// not trusted. Flag it so the UI can surface the email-code flow;
+			// the background poll can't complete it (needs a code from the user).
+			var ge *gigyaError
+			if errors.As(err, &ge) && ge.code == gigyaErrPendingTFA {
+				_ = r.store.Set("vehicle.renault_tfa_required", "true")
+			}
 			return err
 		}
 		r.mu.Lock()
 		r.session = session
 		r.mu.Unlock()
+		_ = r.store.Set("vehicle.renault_session", session)
 	}
 
 	r.mu.RLock()
@@ -303,10 +352,18 @@ func (r *Renault) ensureAuth(user, pass string) error {
 	if !hasJWT {
 		jwt, err := r.gigyaGetJWT(session)
 		if err != nil {
-			// Session expired, clear and fail
+			// Session expired, clear and fail.
 			r.mu.Lock()
 			r.session = ""
 			r.mu.Unlock()
+			// Only drop the persisted login_token when Gigya positively rejected
+			// it (a structured API error), not on a transient transport error —
+			// otherwise a network blip would force an unnecessary fresh login and
+			// re-trigger TFA. A fresh login next cycle re-mints (and may need TFA).
+			var ge *gigyaError
+			if errors.As(err, &ge) {
+				_ = r.store.Delete("vehicle.renault_session")
+			}
 			return err
 		}
 		r.mu.Lock()
@@ -336,11 +393,15 @@ func (r *Renault) ensureAuth(user, pass string) error {
 
 func (r *Renault) gigyaLogin(user, pass string) (string, error) {
 	form := url.Values{
-		"apiKey":  {gigyaAPIKey},
-		"loginID": {user},
+		"apiKey":   {gigyaAPIKey},
+		"loginID":  {user},
 		"password": {pass},
 	}
-	resp, err := r.client.PostForm(gigyaURL+"/accounts.login", form)
+	// Present the trusted-device context (set once via the TFA flow) so Gigya
+	// recognises this device and skips TFA for the ~30-day trust window.
+	r.addDevice(form)
+
+	resp, err := r.client.PostForm(r.gigyaURL+"/accounts.login", form)
 	if err != nil {
 		return "", fmt.Errorf("gigya login: %w", err)
 	}
@@ -350,14 +411,16 @@ func (r *Renault) gigyaLogin(user, pass string) (string, error) {
 		SessionInfo struct {
 			CookieValue string `json:"cookieValue"`
 		} `json:"sessionInfo"`
+		RegToken     string `json:"regToken"`
 		ErrorCode    int    `json:"errorCode"`
 		ErrorMessage string `json:"errorMessage"`
+		ErrorDetails string `json:"errorDetails"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("gigya login decode: %w", err)
 	}
 	if result.ErrorCode != 0 {
-		return "", fmt.Errorf("gigya login: %s (code %d)", result.ErrorMessage, result.ErrorCode)
+		return "", &gigyaError{op: "login", code: result.ErrorCode, message: result.ErrorMessage, details: result.ErrorDetails, regToken: result.RegToken}
 	}
 	if result.SessionInfo.CookieValue == "" {
 		return "", fmt.Errorf("gigya login: empty session token")
@@ -372,7 +435,7 @@ func (r *Renault) gigyaGetPersonID(session string) (string, error) {
 		"ApiKey":      {gigyaAPIKey},
 		"login_token": {session},
 	}
-	resp, err := r.client.PostForm(gigyaURL+"/accounts.getAccountInfo", form)
+	resp, err := r.client.PostForm(r.gigyaURL+"/accounts.getAccountInfo", form)
 	if err != nil {
 		return "", fmt.Errorf("gigya getAccountInfo: %w", err)
 	}
@@ -402,21 +465,27 @@ func (r *Renault) gigyaGetJWT(session string) (string, error) {
 		"fields":      {"data.personId,data.gigyaDataCenter"},
 		"expiration":  {"3600"},
 	}
-	resp, err := r.client.PostForm(gigyaURL+"/accounts.getJWT", form)
+	resp, err := r.client.PostForm(r.gigyaURL+"/accounts.getJWT", form)
 	if err != nil {
 		return "", fmt.Errorf("gigya getJWT: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
-		IDToken   string `json:"id_token"`
-		ErrorCode int    `json:"errorCode"`
+		IDToken      string `json:"id_token"`
+		ErrorCode    int    `json:"errorCode"`
+		ErrorMessage string `json:"errorMessage"`
+		ErrorDetails string `json:"errorDetails"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("gigya getJWT decode: %w", err)
 	}
 	if result.ErrorCode != 0 || result.IDToken == "" {
-		return "", fmt.Errorf("gigya getJWT: no token (code %d)", result.ErrorCode)
+		msg := result.ErrorMessage
+		if msg == "" {
+			msg = "no token"
+		}
+		return "", &gigyaError{op: "getJWT", code: result.ErrorCode, message: msg, details: result.ErrorDetails}
 	}
 
 	r.log.Debug("got JWT")

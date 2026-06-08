@@ -66,6 +66,7 @@ const (
 const (
 	ActionRenaultPoll      Action = "poll"
 	ActionVehicleDetails   Action = "vehicleDetails"
+	ActionRenaultTFA       Action = "tfa"
 )
 
 // auth

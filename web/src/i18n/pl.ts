@@ -245,6 +245,25 @@ const pl: Translations = {
 
   'version.newVersion': 'Wdro\u017cono now\u0105 wersj\u0119',
   'version.reload': 'Prze\u0142aduj aplikacj\u0119',
+
+  // Renault TFA verification
+  'renault.tfa': 'Weryfikacja MyRenault',
+  'renault.tfaIntro': 'MyRenault wymaga weryfikacji e-mail. Wyślij kod, a następnie wpisz go poniżej, aby autoryzować to urządzenie na około 30 dni.',
+  'renault.tfaNotConfigured': 'Wprowadź adres e-mail i hasło MyRenault powyżej, a następnie zapisz przed weryfikacją.',
+  'renault.tfaVerified': 'Zweryfikowano',
+  'renault.tfaLastVerified': 'Ostatnia weryfikacja {date}',
+  'renault.tfaRequired': 'Wymagana weryfikacja',
+  'renault.tfaSendCode': 'Wyślij kod',
+  'renault.tfaSending': 'Wysyłanie…',
+  'renault.tfaResend': 'Wyślij kod ponownie',
+  'renault.tfaCodeSent': 'Kod wysłany na {email}. Wpisz go poniżej.',
+  'renault.tfaAlreadyAuthed': 'Urządzenie już autoryzowane — kod nie jest potrzebny.',
+  'renault.tfaCodePlaceholder': '6-cyfrowy kod',
+  'renault.tfaVerify': 'Zweryfikuj',
+  'renault.tfaVerifying': 'Weryfikacja…',
+  'renault.tfaSuccess': 'Zweryfikowano. Odpytywanie MyRenault wznowione.',
+  'renault.reauthBanner': 'MyRenault wymaga ponownej weryfikacji',
+  'renault.reauthFix': 'Zweryfikuj',
 };
 
 export default pl;

@@ -173,7 +173,7 @@ func main() {
 	}
 
 	// Create web server
-	webSrv := web.New(srv, st, tp, sched, meterPoller, bootID, version, commit, log)
+	webSrv := web.New(srv, st, tp, sched, meterPoller, renaultPoller, bootID, version, commit, log)
 	webPort := st.GetInt("web.port", 3000)
 
 	// Wire up live SSE broadcasts

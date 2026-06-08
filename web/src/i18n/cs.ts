@@ -229,6 +229,25 @@ const cs: Translations = {
 
   'version.newVersion': 'Byla nasazena nov\u00e1 verze',
   'version.reload': 'Znovu na\u010d\u00edst aplikaci',
+
+  // Renault TFA verification
+  'renault.tfa': 'Ověření MyRenault',
+  'renault.tfaIntro': 'MyRenault vyžaduje ověření e-mailem. Odešlete kód a poté jej zadejte níže pro autorizaci tohoto zařízení na přibližně 30 dní.',
+  'renault.tfaNotConfigured': 'Zadejte výše svůj e-mail a heslo MyRenault a před ověřením uložte.',
+  'renault.tfaVerified': 'Ověřeno',
+  'renault.tfaLastVerified': 'Naposledy ověřeno {date}',
+  'renault.tfaRequired': 'Vyžadováno ověření',
+  'renault.tfaSendCode': 'Odeslat kód',
+  'renault.tfaSending': 'Odesílání…',
+  'renault.tfaResend': 'Odeslat kód znovu',
+  'renault.tfaCodeSent': 'Kód odeslán na {email}. Zadejte jej níže.',
+  'renault.tfaAlreadyAuthed': 'Zařízení již autorizováno — kód není potřeba.',
+  'renault.tfaCodePlaceholder': '6místný kód',
+  'renault.tfaVerify': 'Ověřit',
+  'renault.tfaVerifying': 'Ověřování…',
+  'renault.tfaSuccess': 'Ověřeno. Dotazování MyRenault obnoveno.',
+  'renault.reauthBanner': 'MyRenault vyžaduje opětovné ověření',
+  'renault.reauthFix': 'Ověřit',
 };
 
 export default cs;

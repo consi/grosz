@@ -229,6 +229,25 @@ const uk: Translations = {
 
   'version.newVersion': '\u0420\u043e\u0437\u0433\u043e\u0440\u043d\u0443\u0442\u043e \u043d\u043e\u0432\u0443 \u0432\u0435\u0440\u0441\u0456\u044e',
   'version.reload': '\u041f\u0435\u0440\u0435\u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0437\u0430\u0441\u0442\u043e\u0441\u0443\u043d\u043e\u043a',
+
+  // Renault TFA verification
+  'renault.tfa': 'Перевірка MyRenault',
+  'renault.tfaIntro': 'MyRenault потребує перевірки електронною поштою. Надішліть код, а потім введіть його нижче, щоб авторизувати цей пристрій приблизно на 30 днів.',
+  'renault.tfaNotConfigured': 'Введіть вашу електронну пошту та пароль MyRenault вище та збережіть перед перевіркою.',
+  'renault.tfaVerified': 'Перевірено',
+  'renault.tfaLastVerified': 'Востаннє перевірено {date}',
+  'renault.tfaRequired': 'Потрібна перевірка',
+  'renault.tfaSendCode': 'Надіслати код',
+  'renault.tfaSending': 'Надсилання…',
+  'renault.tfaResend': 'Надіслати код повторно',
+  'renault.tfaCodeSent': 'Код надіслано на {email}. Введіть його нижче.',
+  'renault.tfaAlreadyAuthed': 'Пристрій вже авторизовано — код не потрібен.',
+  'renault.tfaCodePlaceholder': '6-значний код',
+  'renault.tfaVerify': 'Перевірити',
+  'renault.tfaVerifying': 'Перевірка…',
+  'renault.tfaSuccess': 'Перевірено. Опитування MyRenault відновлено.',
+  'renault.reauthBanner': 'MyRenault потребує повторної перевірки',
+  'renault.reauthFix': 'Перевірити',
 };
 
 export default uk;

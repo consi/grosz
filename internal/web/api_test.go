@@ -65,7 +65,7 @@ func newAPITestServer(t *testing.T) (*Server, *testutil.TestChargePoint, *ocpp.S
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 
-	web := New(srv, st, noopTariff{}, nil, nil, "test-boot", "test", "test", log)
+	web := New(srv, st, noopTariff{}, nil, nil, nil, "test-boot", "test", "test", log)
 	return web, tcp, srv
 }
 

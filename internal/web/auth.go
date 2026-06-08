@@ -29,7 +29,10 @@ func isBcryptHash(s string) bool {
 
 // sensitiveKeys are settings that should be redacted in API responses and logs.
 var sensitiveKeys = map[string]bool{
-	"auth.password": true,
+	"auth.password":           true,
+	"vehicle.renault_session": true,
+	"vehicle.renault_gmid":    true,
+	"vehicle.renault_ucid":    true,
 }
 
 // migratePasswordHash ensures auth.password is stored as a bcrypt hash.

@@ -696,6 +696,8 @@ nav button:hover { color: var(--text); }
 .setting-row input[type="checkbox"] { width: auto; }
 .settings-actions { display: flex; align-items: center; gap: 1rem; margin-top: 0.5rem; }
 .msg { font-size: 0.85rem; color: var(--primary); }
+.renault-tfa { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--border); }
+.setting-subheading { font-weight: 600; color: var(--primary); font-size: 0.85rem; margin-bottom: 0.25rem; }
 
 /* Schedule slots */
 .schedule-summary {

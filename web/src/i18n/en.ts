@@ -260,6 +260,25 @@ const en = {
   // Version update banner
   'version.newVersion': 'A new version was deployed',
   'version.reload': 'Reload app',
+
+  // Renault TFA verification
+  'renault.tfa': 'MyRenault Verification',
+  'renault.tfaIntro': 'MyRenault requires email verification. Send a code, then enter it below to authorise this device for about 30 days.',
+  'renault.tfaNotConfigured': 'Enter your MyRenault email and password above, then save before verifying.',
+  'renault.tfaVerified': 'Verified',
+  'renault.tfaLastVerified': 'Last verified {date}',
+  'renault.tfaRequired': 'Verification required',
+  'renault.tfaSendCode': 'Send code',
+  'renault.tfaSending': 'Sending…',
+  'renault.tfaResend': 'Resend code',
+  'renault.tfaCodeSent': 'Code sent to {email}. Enter it below.',
+  'renault.tfaAlreadyAuthed': 'Device already authorised — no code needed.',
+  'renault.tfaCodePlaceholder': '6-digit code',
+  'renault.tfaVerify': 'Verify',
+  'renault.tfaVerifying': 'Verifying…',
+  'renault.tfaSuccess': 'Verified. MyRenault polling resumed.',
+  'renault.reauthBanner': 'MyRenault needs re-verification',
+  'renault.reauthFix': 'Verify',
 } as const;
 
 export default en;
