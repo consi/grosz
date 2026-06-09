@@ -58,8 +58,9 @@ const (
 
 // pstryk
 const (
-	ActionFetchConsumption    Action = "fetchConsumption"
-	ActionBackfillConsumption Action = "backfillConsumption"
+	ActionFetchConsumption     Action = "fetchConsumption"
+	ActionBackfillConsumption  Action = "backfillConsumption"
+	ActionFetchLiveConsumption Action = "fetchLiveConsumption"
 )
 
 // renault

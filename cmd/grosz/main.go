@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -208,6 +209,10 @@ func main() {
 		})
 		sched.SetOnRecompute(webSrv.BroadcastStatus)
 	}
+	// Cancelled at the start of the shutdown sequence so delayed callbacks
+	// (boot-hook timer below) don't fire into stopping components.
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
 	// After boot: clear profile state (charger lost its profile), then
 	// delay further commands to let Zappi setup finish its ChangeConfiguration
 	// calls before we send StatusNotification trigger and re-apply schedule.
@@ -216,6 +221,9 @@ func main() {
 			sched.ResetProfileState()
 		}
 		time.AfterFunc(10*time.Second, func() {
+			if shutdownCtx.Err() != nil {
+				return
+			}
 			if err := srv.TriggerMessage(chargePointID, remotetrigger.MessageTrigger(core.StatusNotificationFeatureName)); err != nil {
 				log.Warn("failed to trigger StatusNotification", "cpID", chargePointID, "err", err)
 			}
@@ -253,6 +261,7 @@ func main() {
 		map[string]any{"signal": sig.String(), "bootID": bootID},
 		map[string]any{"uptimeSec": int(time.Since(startedAt).Seconds())},
 	)
+	shutdownCancel()
 	webSrv.Stop()
 	renaultPoller.Stop()
 	meterPoller.Stop()

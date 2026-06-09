@@ -320,6 +320,11 @@ func (s *Scheduler) Stop() {
 		s.debounceTimer.Stop()
 	}
 	s.debounceMu.Unlock()
+	s.modeDebounceMu.Lock()
+	if s.modeDebounceTimer != nil {
+		s.modeDebounceTimer.Stop()
+	}
+	s.modeDebounceMu.Unlock()
 	s.cancel()
 }
 

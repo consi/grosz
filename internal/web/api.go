@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"time"
@@ -34,11 +35,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		evs, err = s.store.RecentEvents(n, offset)
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to list events", err)
 		return
 	}
 
-	total, _ := s.store.EventCount(action)
+	total, err := s.store.EventCount(action)
+	if err != nil {
+		s.log.Warn("failed to count events", "err", err)
+	}
 
 	writeJSON(w, map[string]any{"events": evs, "total": total})
 }
@@ -56,11 +60,14 @@ func (s *Server) handleSystemEvents(w http.ResponseWriter, r *http.Request) {
 		evs, err = s.store.RecentSystemEvents(n, offset)
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to list system events", err)
 		return
 	}
 
-	total, _ := s.store.SystemEventCount(source)
+	total, err := s.store.SystemEventCount(source)
+	if err != nil {
+		s.log.Warn("failed to count system events", "err", err)
+	}
 	sources, _ := s.store.DistinctSystemEventSources()
 
 	writeJSON(w, map[string]any{"events": evs, "total": total, "sources": sources})
@@ -194,7 +201,7 @@ func (s *Server) handleRestoreSlot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListOverrides(w http.ResponseWriter, r *http.Request) {
 	overrides, err := s.store.LoadOverrides(time.Now())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load overrides", err)
 		return
 	}
 	if overrides == nil {
@@ -299,7 +306,7 @@ func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to delete override", err)
 		return
 	}
 
@@ -427,7 +434,7 @@ func (s *Server) handleMeterHourly(w http.ResponseWriter, r *http.Request) {
 	hours := queryInt(r, "hours", 48)
 	data, err := s.store.HourlyConsumption(hours)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load hourly consumption", err)
 		return
 	}
 	writeJSON(w, data)
@@ -482,7 +489,7 @@ func (s *Server) handleChartMarkers(w http.ResponseWriter, r *http.Request) {
 	hours := queryInt(r, "hours", 72)
 	markers, err := s.store.RecentChartMarkers(hours)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load chart markers", err)
 		return
 	}
 	if markers == nil {
@@ -495,7 +502,7 @@ func (s *Server) handleMeterPhases(w http.ResponseWriter, r *http.Request) {
 	minutes := queryInt(r, "minutes", 60)
 	data, err := s.store.RecentPhaseReadings(minutes)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load phase readings", err)
 		return
 	}
 	writeJSON(w, data)
@@ -525,18 +532,24 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if !from.IsZero() && !to.IsZero() {
 			sessions, err = s.store.SessionsByDateRange(from, to, limit, offset)
 			if err == nil {
-				total, _ = s.store.SessionCount(&from, &to)
+				if total, err = s.store.SessionCount(&from, &to); err != nil {
+					s.log.Warn("failed to count sessions", "err", err)
+					err = nil
+				}
 			}
 		}
 	}
 	if sessions == nil {
 		sessions, err = s.store.SessionHistory(limit, offset)
 		if err == nil {
-			total, _ = s.store.SessionCount(nil, nil)
+			if total, err = s.store.SessionCount(nil, nil); err != nil {
+				s.log.Warn("failed to count sessions", "err", err)
+				err = nil
+			}
 		}
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to list sessions", err)
 		return
 	}
 
@@ -564,7 +577,7 @@ func (s *Server) handleCostLog(w http.ResponseWriter, r *http.Request) {
 
 	items, total, err := s.store.CostLogItems(from, to, limit, offset)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load cost log", err)
 		return
 	}
 	writeJSON(w, map[string]any{"items": items, "total": total})
@@ -594,7 +607,7 @@ func (s *Server) handleSessionReport(w http.ResponseWriter, r *http.Request) {
 
 	report, err := s.store.SessionReportByRange(from, to)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to build session report", err)
 		return
 	}
 	writeJSON(w, report)
@@ -623,7 +636,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 
 	report, err := s.store.SessionReportByRange(from, to)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to build session report", err)
 		return
 	}
 
@@ -723,7 +736,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 				desc += fmt.Sprintf(" (%.0f km since prev, %.1f kWh/100km 30d avg)", item.Distance, item.KWhPer100km)
 			}
 			_, _ = fmt.Fprintf(w, "<tr><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%s</td><td class=\"num\">%s</td></tr>\n",
-				item.Date, item.Type, desc, energy, cost)
+				html.EscapeString(item.Date), html.EscapeString(item.Type), html.EscapeString(desc), energy, cost)
 		}
 		_, _ = fmt.Fprint(w, "</table>\n")
 	}
@@ -750,7 +763,7 @@ func (s *Server) handleExternalCosts(w http.ResponseWriter, r *http.Request) {
 
 	costs, err := s.store.ExternalCostsByDateRange(from, to)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load external costs", err)
 		return
 	}
 	writeJSON(w, map[string]any{"costs": costs})
@@ -777,7 +790,7 @@ func (s *Server) handleAddExternalCost(w http.ResponseWriter, r *http.Request) {
 		Amount:      req.Amount,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to add external cost", err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "id": id})
@@ -800,6 +813,13 @@ func (s *Server) handleDeleteExternalCost(w http.ResponseWriter, r *http.Request
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// internalError logs the real error server-side and returns a generic 500 so
+// internals (SQL errors, paths) never leak into HTTP responses.
+func (s *Server) internalError(w http.ResponseWriter, msg string, err error) {
+	s.log.Error(msg, "err", err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
 // formatCostLogDescriptions sets the Description field for charging items

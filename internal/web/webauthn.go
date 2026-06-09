@@ -137,7 +137,7 @@ func (s *Server) newWebAuthn(r *http.Request) (*webauthn.WebAuthn, error) {
 func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	wan, err := s.newWebAuthn(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn init failed", err)
 		return
 	}
 
@@ -154,7 +154,7 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementPreferred),
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn begin registration failed", err)
 		return
 	}
 
@@ -192,7 +192,7 @@ func (s *Server) handleWebAuthnRegisterComplete(w http.ResponseWriter, r *http.R
 
 	wan, err := s.newWebAuthn(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn init failed", err)
 		return
 	}
 
@@ -239,7 +239,7 @@ func (s *Server) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.Request
 
 	wan, err := s.newWebAuthn(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn init failed", err)
 		return
 	}
 
@@ -247,7 +247,7 @@ func (s *Server) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.Request
 
 	assertion, session, err := wan.BeginLogin(user)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn begin login failed", err)
 		return
 	}
 
@@ -283,7 +283,7 @@ func (s *Server) handleWebAuthnLoginComplete(w http.ResponseWriter, r *http.Requ
 
 	wan, err := s.newWebAuthn(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "webauthn init failed", err)
 		return
 	}
 
@@ -330,7 +330,7 @@ func (s *Server) handleWebAuthnLoginComplete(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleWebAuthnCredentials(w http.ResponseWriter, r *http.Request) {
 	creds, err := s.store.ListCredentials()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to list credentials", err)
 		return
 	}
 

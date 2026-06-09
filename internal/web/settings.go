@@ -38,7 +38,7 @@ var schedulerCacheKeys = map[string]bool{
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	all, err := s.store.All()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to load settings", err)
 		return
 	}
 	// Redact sensitive values
@@ -73,7 +73,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.SetMany(updates); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.internalError(w, "failed to save settings", err)
 		return
 	}
 

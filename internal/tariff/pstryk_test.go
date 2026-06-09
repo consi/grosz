@@ -1,6 +1,7 @@
 package tariff_test
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -198,7 +199,7 @@ func TestPstrykFetchConsumption_FaeUsage(t *testing.T) {
 	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
 	defer p.Stop()
 
-	frames, err := p.FetchConsumption(now, now.Add(3*time.Hour))
+	frames, err := p.FetchConsumption(context.Background(), now, now.Add(3*time.Hour))
 	require.NoError(t, err)
 	require.Len(t, frames, 3)
 	assert.InDelta(t, 1250.0, frames[0].EnergyWh, 0.01) // 1.25 kWh → 1250 Wh
@@ -235,7 +236,7 @@ func TestPstrykFetchConsumption_MeterValuesFallback(t *testing.T) {
 	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
 	defer p.Stop()
 
-	frames, err := p.FetchConsumption(now, now.Add(2*time.Hour))
+	frames, err := p.FetchConsumption(context.Background(), now, now.Add(2*time.Hour))
 	require.NoError(t, err)
 	require.Len(t, frames, 2)
 	assert.InDelta(t, 800.0, frames[0].EnergyWh, 0.01)
@@ -273,7 +274,7 @@ func TestPstrykFetchConsumption_SkipsEmptyFrames(t *testing.T) {
 	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
 	defer p.Stop()
 
-	frames, err := p.FetchConsumption(now, now.Add(2*time.Hour))
+	frames, err := p.FetchConsumption(context.Background(), now, now.Add(2*time.Hour))
 	require.NoError(t, err)
 	require.Len(t, frames, 1)
 	assert.InDelta(t, 500.0, frames[0].EnergyWh, 0.01)
@@ -286,7 +287,7 @@ func TestPstrykFetchConsumption_NoToken(t *testing.T) {
 	p := tariff.NewPstrykWithURL(st, testLogger(), "http://localhost:1")
 	defer p.Stop()
 
-	_, err := p.FetchConsumption(time.Now().Add(-time.Hour), time.Now())
+	_, err := p.FetchConsumption(context.Background(), time.Now().Add(-time.Hour), time.Now())
 	assert.Error(t, err)
 }
 
@@ -316,12 +317,122 @@ func TestPstrykFetchConsumption_HourKeyIsUTC(t *testing.T) {
 	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
 	defer p.Stop()
 
-	frames, err := p.FetchConsumption(time.Now().Add(-time.Hour), time.Now())
+	frames, err := p.FetchConsumption(context.Background(), time.Now().Add(-time.Hour), time.Now())
 	require.NoError(t, err)
 	require.Len(t, frames, 1)
 	assert.True(t, frames[0].Hour.Equal(expectedHour),
 		"expected %s got %s", expectedHour.Format(time.RFC3339), frames[0].Hour.Format(time.RFC3339))
 	assert.Equal(t, time.UTC, frames[0].Hour.Location())
+}
+
+// TestPstrykRefreshToday_HourFrame: Pstryk returns an hour-resolution frame
+// for the in-progress hour — it lands in the store with the finalized hours.
+func TestPstrykRefreshToday_HourFrame(t *testing.T) {
+	currentHour := time.Now().UTC().Truncate(time.Hour)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("metrics") != "meter_values" || q.Get("resolution") != "hour" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"frames": []map[string]any{}})
+			return
+		}
+		// Only the live refresh asks for a window extending past the current
+		// hour; the backfill loop is clamped to finalized hours.
+		we, _ := time.Parse(time.RFC3339, q.Get("window_end"))
+		if !we.After(currentHour) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"frames": []map[string]any{}})
+			return
+		}
+		frames := []map[string]any{
+			{
+				"start":     currentHour.Add(-time.Hour).Format(time.RFC3339),
+				"end":       currentHour.Format(time.RFC3339),
+				"is_live":   false,
+				"fae_usage": 1.0,
+			},
+			{
+				"start":     currentHour.Format(time.RFC3339),
+				"end":       currentHour.Add(time.Hour).Format(time.RFC3339),
+				"is_live":   true,
+				"fae_usage": 0.42,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"frames": frames})
+	}))
+	defer srv.Close()
+
+	st := testStore(t)
+	require.NoError(t, st.Set("tariff.pstryk_token", "test-token"))
+
+	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
+	defer p.Stop()
+
+	require.NoError(t, p.RefreshTodayConsumption(context.Background()))
+
+	latest, ok := st.LatestPstrykHour()
+	require.True(t, ok)
+	assert.True(t, latest.Equal(currentHour), "in-progress hour must be stored")
+
+	rows, err := st.PstrykHourlyConsumption(48)
+	require.NoError(t, err)
+	require.NotEmpty(t, rows)
+	last := rows[len(rows)-1]
+	assert.True(t, last.Hour.Equal(currentHour))
+	assert.InDelta(t, 420.0, last.EnergyWh, 0.01) // 0.42 kWh → 420 Wh
+}
+
+// TestPstrykRefreshToday_FinalizedOnly: Pstryk (as observed in production)
+// returns no frame for the in-progress hour — only finalized hours are
+// stored, and nothing is fabricated for the current hour.
+func TestPstrykRefreshToday_FinalizedOnly(t *testing.T) {
+	currentHour := time.Now().UTC().Truncate(time.Hour)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("metrics") != "meter_values" || q.Get("resolution") != "hour" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"frames": []map[string]any{}})
+			return
+		}
+		frames := []map[string]any{
+			{
+				"start":     currentHour.Add(-2 * time.Hour).Format(time.RFC3339),
+				"end":       currentHour.Add(-time.Hour).Format(time.RFC3339),
+				"fae_usage": 1.0,
+			},
+			{
+				"start":     currentHour.Add(-time.Hour).Format(time.RFC3339),
+				"end":       currentHour.Format(time.RFC3339),
+				"fae_usage": 1.0,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"frames": frames})
+	}))
+	defer srv.Close()
+
+	st := testStore(t)
+	require.NoError(t, st.Set("tariff.pstryk_token", "test-token"))
+
+	p := tariff.NewPstrykWithURL(st, testLogger(), srv.URL)
+	defer p.Stop()
+
+	require.NoError(t, p.RefreshTodayConsumption(context.Background()))
+
+	latest, ok := st.LatestPstrykHour()
+	require.True(t, ok)
+	assert.True(t, latest.Equal(currentHour.Add(-time.Hour)),
+		"only finalized hours stored, got %s", latest.Format(time.RFC3339))
+}
+
+// TestPstrykRefreshToday_NoToken: silently a no-op (the backfill loop owns
+// the missing-token warning).
+func TestPstrykRefreshToday_NoToken(t *testing.T) {
+	st := testStore(t)
+	p := tariff.NewPstrykWithURL(st, testLogger(), "http://localhost:1")
+	defer p.Stop()
+
+	require.NoError(t, p.RefreshTodayConsumption(context.Background()))
+	_, ok := st.LatestPstrykHour()
+	assert.False(t, ok)
 }
 
 func testStore(t *testing.T) *store.Store {

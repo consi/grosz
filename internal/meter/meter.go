@@ -359,19 +359,3 @@ func (p *Poller) snapshotIdle() {
 		p.mu.Unlock()
 	}
 }
-
-// FetchOnce does a single meter fetch, for testing connectivity.
-func FetchOnce(meterURL string) (*stateResponse, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(meterURL + "/state")
-	if err != nil {
-		return nil, fmt.Errorf("fetch: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var state stateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	return &state, nil
-}

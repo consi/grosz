@@ -19,13 +19,11 @@ func (s *Server) OnFirmwareStatusNotification(chargePointId string, request *fir
 
 	if s.store != nil {
 		input := map[string]any{"cpID": chargePointId}
-		result := map[string]any{"status": string(request.Status)}
 		switch request.Status {
 		case firmware.FirmwareStatusDownloadFailed, firmware.FirmwareStatusInstallationFailed:
 			s.events.Error(events.ActionFirmwareStatus, input, fmt.Errorf("status=%s", request.Status))
-			_ = result
 		default:
-			s.events.Info(events.ActionFirmwareStatus, input, result)
+			s.events.Info(events.ActionFirmwareStatus, input, map[string]any{"status": string(request.Status)})
 		}
 	}
 

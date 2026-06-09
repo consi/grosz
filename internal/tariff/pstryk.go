@@ -65,6 +65,12 @@ type Pstryk struct {
 	// token IS present so a later misconfiguration warns once again.
 	noTokenWarnAt time.Time
 
+	// liveEventHour is the last hour for which the live loop logged its
+	// once-per-hour success event. liveWarnAt debounces live-fetch error
+	// events the same way noTokenWarnAt debounces the token warn.
+	liveEventHour time.Time
+	liveWarnAt    time.Time
+
 	cancel context.CancelFunc
 }
 
@@ -119,8 +125,9 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 	// Pricing is synchronous: the scheduler waits on `hasRates` below.
 	// Consumption backfill can be slow on cold-start (up to 48h of frames +
 	// idle rebuilds), so run it off the goroutine that owns the ticker.
-	p.fetchAndStore()
-	go p.fetchConsumptionAndStore()
+	p.fetchAndStore(ctx)
+	go p.fetchConsumptionAndStore(ctx)
+	go p.liveLoop(ctx)
 
 	// Use a short interval initially — once rates are loaded, switch to hourly
 	ticker := time.NewTicker(2 * time.Minute)
@@ -132,8 +139,8 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.fetchAndStore()
-			p.fetchConsumptionAndStore()
+			p.fetchAndStore(ctx)
+			p.fetchConsumptionAndStore(ctx)
 
 			p.mu.RLock()
 			hasRates := len(p.rates) > 0
@@ -161,7 +168,7 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 	}
 }
 
-func (p *Pstryk) fetchAndStore() {
+func (p *Pstryk) fetchAndStore(ctx context.Context) {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
 		p.log.Warn("pstryk token not configured, skipping fetch")
@@ -171,8 +178,11 @@ func (p *Pstryk) fetchAndStore() {
 		return
 	}
 
-	rates, err := p.fetch(token)
+	rates, err := p.fetch(ctx, token)
 	if err != nil {
+		if ctx.Err() != nil {
+			return // shutting down; not an error
+		}
 		p.log.Warn("failed to fetch rates", "err", err)
 		p.tariffEvents.Error(events.ActionFetchRates, nil, err)
 		return
@@ -222,9 +232,9 @@ func (p *Pstryk) fetchAndStore() {
 // unifiedMetrics issues a GET to the shared unified-metrics endpoint and
 // decodes the response. All Pstryk integration endpoints we use share auth,
 // rate-limit shape, and JSON envelope, so this centralizes the boilerplate.
-func (p *Pstryk) unifiedMetrics(token string, params url.Values) (*pstrykResponse, error) {
+func (p *Pstryk) unifiedMetrics(ctx context.Context, token string, params url.Values) (*pstrykResponse, error) {
 	reqURL := fmt.Sprintf("%s/integrations/meter-data/unified-metrics/?%s", p.baseURL, params.Encode())
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
@@ -252,7 +262,7 @@ func (p *Pstryk) unifiedMetrics(token string, params url.Values) (*pstrykRespons
 	return &data, nil
 }
 
-func (p *Pstryk) fetch(token string) ([]Rate, error) {
+func (p *Pstryk) fetch(ctx context.Context, token string) ([]Rate, error) {
 	now := time.Now().UTC()
 	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	windowEnd := todayMidnight.Add(48 * time.Hour)
@@ -263,7 +273,7 @@ func (p *Pstryk) fetch(token string) ([]Rate, error) {
 	params.Set("window_start", todayMidnight.Format(time.RFC3339))
 	params.Set("window_end", windowEnd.Format(time.RFC3339))
 
-	data, err := p.unifiedMetrics(token, params)
+	data, err := p.unifiedMetrics(ctx, token, params)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +305,7 @@ func (p *Pstryk) fetch(token string) ([]Rate, error) {
 // the same unified-metrics endpoint as pricing, but with metrics=meter_values.
 // Frames where neither fae_usage nor meter_values.energy_active_import_register
 // is populated are skipped. Empty result on success is fine — caller checks.
-func (p *Pstryk) FetchConsumption(start, end time.Time) ([]store.PstrykConsumption, error) {
+func (p *Pstryk) FetchConsumption(ctx context.Context, start, end time.Time) ([]store.PstrykConsumption, error) {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
 		return nil, fmt.Errorf("pstryk token not configured")
@@ -310,7 +320,7 @@ func (p *Pstryk) FetchConsumption(start, end time.Time) ([]store.PstrykConsumpti
 	// (HTTP 400 otherwise). Frames come back with UTC offset markers anyway
 	// and we Truncate to UTC top-of-hour when keying, so we don't need it.
 
-	data, err := p.unifiedMetrics(token, params)
+	data, err := p.unifiedMetrics(ctx, token, params)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +344,97 @@ func (p *Pstryk) FetchConsumption(start, end time.Time) ([]store.PstrykConsumpti
 		})
 	}
 	return out, nil
+}
+
+// liveRefreshInterval paces the background live-consumption loop. The graph
+// doesn't need to be realtime — a couple of minutes of lag is acceptable and
+// keeps Pstryk API usage modest (~30 cycles/hour, 1-2 requests each).
+const liveRefreshInterval = 2 * time.Minute
+
+// liveLoop keeps today's finalized consumption fresh in the store: a just-
+// finished hour shows up within ~liveRefreshInterval of the rollover instead
+// of whenever the hourly backfill tick happens to fire. The in-progress hour
+// itself is NOT available from Pstryk (even is_live frames only grow as hours
+// finalize) — store.HourlyConsumption derives it from local meter readings.
+func (p *Pstryk) liveLoop(ctx context.Context) {
+	ticker := time.NewTicker(liveRefreshInterval)
+	defer ticker.Stop()
+	_ = p.RefreshTodayConsumption(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = p.RefreshTodayConsumption(ctx)
+		}
+	}
+}
+
+// RefreshTodayConsumption fetches today's hourly frames from Pstryk and
+// upserts whatever it returns (finalized hours, plus the in-progress hour
+// should Pstryk ever start reporting it). Errors are event-logged (debounced)
+// and returned; the next tick retries.
+func (p *Pstryk) RefreshTodayConsumption(ctx context.Context) error {
+	token := p.store.GetDefault("tariff.pstryk_token", "")
+	if token == "" {
+		return nil // fetchConsumptionAndStore already warns about this
+	}
+
+	currentHour := time.Now().UTC().Truncate(time.Hour)
+	loc, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		loc = time.FixedZone("CET", 3600)
+	}
+	nowLocal := time.Now().In(loc)
+	dayStart := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc)
+
+	frames, err := p.FetchConsumption(ctx, dayStart, currentHour.Add(time.Hour))
+	if err != nil {
+		p.warnLive(ctx, currentHour, err)
+		return err
+	}
+	if len(frames) > 0 {
+		if err := p.store.UpsertPstrykConsumption(frames); err != nil {
+			p.warnLive(ctx, currentHour, err)
+			return err
+		}
+	}
+
+	p.mu.Lock()
+	newHour := !p.liveEventHour.Equal(currentHour)
+	if newHour {
+		p.liveEventHour = currentHour
+	}
+	p.liveWarnAt = time.Time{}
+	p.mu.Unlock()
+	if newHour {
+		p.pstrykEvents.Info(events.ActionFetchLiveConsumption,
+			map[string]any{"hour": currentHour.Format(time.RFC3339)},
+			map[string]any{"frames": len(frames)},
+		)
+	}
+	return nil
+}
+
+// warnLive event-logs a live-refresh failure at most once per hour, mirroring
+// the noTokenWarnAt debounce. Shutdown-canceled contexts are not warned about.
+func (p *Pstryk) warnLive(ctx context.Context, hour time.Time, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	p.mu.Lock()
+	shouldWarn := time.Since(p.liveWarnAt) >= time.Hour
+	if shouldWarn {
+		p.liveWarnAt = time.Now()
+	}
+	p.mu.Unlock()
+	if shouldWarn {
+		p.pstrykEvents.Warn(events.ActionFetchLiveConsumption,
+			map[string]any{"hour": hour.Format(time.RFC3339)},
+			map[string]any{"error": err.Error()},
+		)
+	}
+	p.log.Warn("failed to refresh live consumption", "err", err)
 }
 
 // extractFaeUsage pulls per-frame imported energy (kWh) from either the
@@ -370,7 +471,7 @@ const (
 // now, pulls Pstryk consumption frames to fill it, upserts them, and triggers
 // a daily-idle rebuild for each affected date. Idempotent — returns quickly
 // when there's nothing new to fetch (steady state during normal operation).
-func (p *Pstryk) fetchConsumptionAndStore() {
+func (p *Pstryk) fetchConsumptionAndStore(ctx context.Context) {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
 		p.mu.Lock()
@@ -403,7 +504,10 @@ func (p *Pstryk) fetchConsumptionAndStore() {
 	since := desired
 	if earliest, ok := p.store.EarliestPstrykHour(); ok && !earliest.After(desired) {
 		if latest, ok := p.store.LatestPstrykHour(); ok {
-			since = latest.Add(time.Hour)
+			// Re-fetch from `latest` inclusive: the live loop stores a partial
+			// value for the in-progress hour, so the newest row may need its
+			// finalized value (e.g., a partial left behind before a restart).
+			since = latest
 		}
 	}
 	if floor := now.Add(-consumptionCap); since.Before(floor) {
@@ -422,12 +526,18 @@ func (p *Pstryk) fetchConsumptionAndStore() {
 	affectedDates := make(map[time.Time]struct{})
 
 	for chunkStart := since; chunkStart.Before(until); {
+		if ctx.Err() != nil {
+			return // shutting down
+		}
 		chunkEnd := chunkStart.Add(consumptionChunk)
 		if chunkEnd.After(until) {
 			chunkEnd = until
 		}
-		frames, err := p.FetchConsumption(chunkStart, chunkEnd)
+		frames, err := p.FetchConsumption(ctx, chunkStart, chunkEnd)
 		if err != nil {
+			if ctx.Err() != nil {
+				return // shutting down; not an error
+			}
 			p.log.Warn("failed to fetch consumption", "err", err,
 				"from", chunkStart.Format(time.RFC3339),
 				"to", chunkEnd.Format(time.RFC3339),
@@ -471,6 +581,9 @@ func (p *Pstryk) fetchConsumptionAndStore() {
 
 	rebuilt := make([]string, 0, len(affectedDates))
 	for day := range affectedDates {
+		if ctx.Err() != nil {
+			return // shutting down
+		}
 		if err := p.store.RebuildDailyIdle(day); err != nil {
 			p.log.Warn("failed to rebuild daily idle", "date", day.Format(time.DateOnly), "err", err)
 			continue

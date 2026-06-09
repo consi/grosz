@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -50,11 +51,43 @@ func (s *Store) PurgeMeterReadings(maxAge time.Duration) error {
 // Prefers Pstryk-sourced rows when present (long-term retention). Falls back
 // to aggregating the local meter_readings table when Pstryk has no data —
 // happens on fresh deploys, missing token, or repeated fetch failures.
+// Pstryk's API never reports the in-progress hour (even its is_live frames
+// only grow as hours finalize), so the current hour is derived from local
+// meter readings when Pstryk rows don't cover it.
 func (s *Store) HourlyConsumption(hours int) ([]HourlyEnergy, error) {
-	if pstryk, err := s.PstrykHourlyConsumption(hours); err == nil && len(pstryk) > 0 {
-		return pstryk, nil
+	pstryk, err := s.PstrykHourlyConsumption(hours)
+	if err != nil || len(pstryk) == 0 {
+		return s.hourlyConsumptionFromMeter(hours)
 	}
-	return s.hourlyConsumptionFromMeter(hours)
+	currentHour := time.Now().UTC().Truncate(time.Hour)
+	if pstryk[len(pstryk)-1].Hour.Before(currentHour) {
+		if cur, ok := s.meterHourConsumption(currentHour); ok {
+			pstryk = append(pstryk, cur)
+		}
+	}
+	return pstryk, nil
+}
+
+// meterHourConsumption derives a single hour's consumption from the local
+// meter's cumulative import register (max − min within the hour, monotonic).
+// ok=false when the hour has no readings.
+func (s *Store) meterHourConsumption(hour time.Time) (HourlyEnergy, bool) {
+	var consumedWh, avgPowerW sql.NullFloat64
+	err := s.db.QueryRow(`
+		SELECT MAX(energy_wh) - MIN(energy_wh), AVG(power_w)
+		FROM meter_readings
+		WHERE timestamp >= ? AND timestamp < ?`,
+		hour.UTC().Format(time.RFC3339),
+		hour.Add(time.Hour).UTC().Format(time.RFC3339),
+	).Scan(&consumedWh, &avgPowerW)
+	if err != nil || !consumedWh.Valid {
+		return HourlyEnergy{}, false
+	}
+	return HourlyEnergy{
+		Hour:     hour.UTC().Truncate(time.Hour),
+		EnergyWh: consumedWh.Float64,
+		PowerW:   avgPowerW.Float64,
+	}, true
 }
 
 func (s *Store) hourlyConsumptionFromMeter(hours int) ([]HourlyEnergy, error) {
