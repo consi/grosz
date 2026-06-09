@@ -15,6 +15,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 
+	"github.com/consi/grosz/internal/abrp"
 	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/meter"
 	"github.com/consi/grosz/internal/ocpp"
@@ -33,45 +34,46 @@ var (
 
 // Default settings seeded on first run.
 var defaultSettings = map[string]string{
-	"auth.username":            "admin",
-	"auth.password":            "admin",
-	"auth.session_lifetime_days": "30",
-	"ocpp.port":                "8887",
-	"ocpp.path":                "/{ws}",
-	"ocpp.auth_key":            "",
-	"zappi.charge_box_id":      "",
-	"zappi.commercial_mode":    "true",
-	"zappi.id_tag":             "grosz",
-	"zappi.meter_interval":     "10",
-	"zappi.charger_name":       "",
-	"zappi.charge_id":          "",
-	"zappi.qr_url":             "",
-	"charger.max_power":        "11000",
-	"charger.min_power":        "1380",
-	"charger.phases":           "3",
+	"auth.username":                "admin",
+	"auth.password":                "admin",
+	"auth.session_lifetime_days":   "30",
+	"ocpp.port":                    "8887",
+	"ocpp.path":                    "/{ws}",
+	"ocpp.auth_key":                "",
+	"zappi.charge_box_id":          "",
+	"zappi.commercial_mode":        "true",
+	"zappi.id_tag":                 "grosz",
+	"zappi.meter_interval":         "10",
+	"zappi.charger_name":           "",
+	"zappi.charge_id":              "",
+	"zappi.qr_url":                 "",
+	"charger.max_power":            "11000",
+	"charger.min_power":            "1380",
+	"charger.phases":               "3",
 	"charger.status_check_minutes": "25",
-	"tariff.pstryk_token":      "",
-	"scheduler.enabled":          "true",
-	"scheduler.target_energy":    "30",
-	"scheduler.deadline_time":    "07:00",
-	"scheduler.battery_capacity": "0",
-	"scheduler.target_soc":       "0",
-	"scheduler.skip_above_soc":   "0",
-	"scheduler.min_soc":          "0",
-	"scheduler.current_soc":      "0",
-	"scheduler.max_price":        "0",
-	"scheduler.charge_headroom":  "3",
-	"vehicle.renault_user":       "",
-	"vehicle.renault_password":   "",
-	"vehicle.vin":                "",
-	"vehicle.poll_interval":      "15",
-	"vehicle.require_plug_check": "false",
-	"charger.mode":             "schedule",
-	"meter.url":                "",
-	"meter.interval":           "5",
-	"web.port":                 "3000",
-	"log.level":                "info",
-	"log.format":               "text",
+	"tariff.pstryk_token":          "",
+	"abrp.token":                   "",
+	"scheduler.enabled":            "true",
+	"scheduler.target_energy":      "30",
+	"scheduler.deadline_time":      "07:00",
+	"scheduler.battery_capacity":   "0",
+	"scheduler.target_soc":         "0",
+	"scheduler.skip_above_soc":     "0",
+	"scheduler.min_soc":            "0",
+	"scheduler.current_soc":        "0",
+	"scheduler.max_price":          "0",
+	"scheduler.charge_headroom":    "3",
+	"vehicle.renault_user":         "",
+	"vehicle.renault_password":     "",
+	"vehicle.vin":                  "",
+	"vehicle.poll_interval":        "15",
+	"vehicle.require_plug_check":   "false",
+	"charger.mode":                 "schedule",
+	"meter.url":                    "",
+	"meter.interval":               "5",
+	"web.port":                     "3000",
+	"log.level":                    "info",
+	"log.format":                   "text",
 }
 
 func main() {
@@ -142,8 +144,10 @@ func main() {
 	// Create meter poller
 	meterPoller := meter.New(st, log)
 
-	// Create Renault SoC poller
+	// Create Renault SoC poller; wire ABRP telemetry forwarding (no-op until a
+	// token is configured in settings).
 	renaultPoller := vehicle.NewRenault(st, log)
+	renaultPoller.SetABRP(abrp.New(st, log))
 
 	// Create OCPP server
 	srv := ocpp.NewServer(st, log)

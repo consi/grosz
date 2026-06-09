@@ -69,6 +69,11 @@ const (
 	ActionRenaultTFA       Action = "tfa"
 )
 
+// abrp
+const (
+	ActionABRPSend Action = "send"
+)
+
 // auth
 const (
 	ActionLogin                 Action = "login"

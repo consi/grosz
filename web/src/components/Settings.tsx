@@ -65,6 +65,12 @@ const groups: SettingGroup[] = [
     ],
   },
   {
+    titleKey: 'settings.abrp',
+    keys: [
+      { key: 'abrp.token', labelKey: 'settings.abrpToken', type: 'password' },
+    ],
+  },
+  {
     titleKey: 'settings.energyMeter',
     keys: [
       { key: 'meter.url', labelKey: 'settings.meterUrl', type: 'text' },

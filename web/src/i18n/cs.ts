@@ -201,6 +201,8 @@ const cs: Translations = {
   'settings.confirmAction': 'Potvrdit?',
   'settings.tariff': 'Tarif',
   'settings.pstrykToken': 'Pstryk API token',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': 'Token ABRP',
   'settings.energyMeter': 'Elektrom\u011br',
   'settings.meterUrl': 'URL m\u011b\u0159i\u010de',
   'settings.pollInterval': 'Interval dotazov\u00e1n\u00ed (s)',

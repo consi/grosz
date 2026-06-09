@@ -201,6 +201,8 @@ const uk: Translations = {
   'settings.confirmAction': '\u041f\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u0438?',
   'settings.tariff': '\u0422\u0430\u0440\u0438\u0444',
   'settings.pstrykToken': 'Pstryk API \u0442\u043e\u043a\u0435\u043d',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': '\u0422\u043e\u043a\u0435\u043d ABRP',
   'settings.energyMeter': '\u041b\u0456\u0447\u0438\u043b\u044c\u043d\u0438\u043a \u0435\u043d\u0435\u0440\u0433\u0456\u0457',
   'settings.meterUrl': 'URL \u043b\u0456\u0447\u0438\u043b\u044c\u043d\u0438\u043a\u0430',
   'settings.pollInterval': '\u0406\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043e\u043f\u0438\u0442\u0443\u0432\u0430\u043d\u043d\u044f (\u0441)',

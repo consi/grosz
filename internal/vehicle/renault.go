@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consi/grosz/internal/abrp"
 	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/store"
 )
@@ -67,12 +68,29 @@ type CockpitStatus struct {
 
 // BatteryStatus holds the vehicle's battery state.
 type BatteryStatus struct {
-	Level         int     `json:"batteryLevel"`     // 0-100 %
-	Autonomy      int     `json:"batteryAutonomy"`  // km
-	PlugStatus    int     `json:"plugStatus"`       // 0=unplugged, 1=plugged
-	ChargingStatus float64 `json:"chargingStatus"`  // 0=not charging, >0=charging
-	RemainingTime int     `json:"chargingRemainingTime"` // minutes
-	Timestamp     string  `json:"timestamp"`
+	Level          int     `json:"batteryLevel"`          // 0-100 %
+	Autonomy       int     `json:"batteryAutonomy"`       // km
+	PlugStatus     int     `json:"plugStatus"`            // 0=unplugged, 1=plugged
+	ChargingStatus float64 `json:"chargingStatus"`        // 0=not charging, >0=charging
+	RemainingTime  int     `json:"chargingRemainingTime"` // minutes
+	Timestamp      string  `json:"timestamp"`
+
+	// Extended fields used for ABRP telemetry. Both decode from the same
+	// battery-status response and are nullable (absent on some models).
+	BatteryTemperature         *float64 `json:"batteryTemperature"`         // °C
+	ChargingInstantaneousPower *float64 `json:"chargingInstantaneousPower"` // W or kW (model-dependent), only while charging
+}
+
+// HvacStatus holds climate data; we use it for ambient (external) temperature.
+type HvacStatus struct {
+	ExternalTemperature *float64 `json:"externalTemperature"` // °C
+}
+
+// LocationStatus holds the vehicle's GPS position. Not supported on all models
+// (e.g. Zoe returns 403), so callers treat it as best-effort.
+type LocationStatus struct {
+	GPSLatitude  float64 `json:"gpsLatitude"`
+	GPSLongitude float64 `json:"gpsLongitude"`
 }
 
 // Renault polls the MyRenault/Kamereon API for battery SoC.
@@ -93,7 +111,8 @@ type Renault struct {
 	accountID        string
 	jwtExpiry        time.Time
 	last             *BatteryStatus
-	onUpdate         func(int) // called with SoC on successful poll
+	onUpdate         func(int)    // called with SoC on successful poll
+	abrp             *abrp.Client // optional ABRP telemetry pusher
 	detailsFetchedAt time.Time
 	tfa              *tfaPending // in-flight TFA verification, if any
 
@@ -153,6 +172,14 @@ func (r *Renault) SetOnUpdate(fn func(int)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onUpdate = fn
+}
+
+// SetABRP registers the ABRP telemetry client used to forward vehicle data
+// after each successful poll. Optional — a nil client disables ABRP pushing.
+func (r *Renault) SetABRP(c *abrp.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.abrp = c
 }
 
 func (r *Renault) loop(ctx context.Context) {
@@ -291,6 +318,15 @@ func (r *Renault) poll(user, pass, vin string) error {
 	// A successful poll proves auth is healthy — clear any stale TFA flag.
 	if r.store.GetBool("vehicle.renault_tfa_required", false) {
 		_ = r.store.Set("vehicle.renault_tfa_required", "false")
+	}
+
+	// Forward telemetry to ABRP (no-op unless a token is configured). Gated on
+	// Enabled() so the extra hvac/location fetches are skipped when ABRP is off.
+	r.mu.RLock()
+	ac := r.abrp
+	r.mu.RUnlock()
+	if ac != nil && ac.Enabled() {
+		r.pushABRP(ac, vin, status, totalMileage)
 	}
 
 	return nil
@@ -612,6 +648,166 @@ func (r *Renault) getCockpitStatus(vin string) (*CockpitStatus, error) {
 	}
 
 	return nil, fmt.Errorf("cockpit unavailable on v1 and v2")
+}
+
+// getHvacStatus fetches climate data (we use ambient/external temperature) from
+// the car-adapter hvac-status endpoint. Best-effort: callers ignore errors.
+func (r *Renault) getHvacStatus(vin string) (*HvacStatus, error) {
+	r.mu.RLock()
+	accountID := r.accountID
+	jwt := r.jwt
+	r.mu.RUnlock()
+
+	vin = strings.ToUpper(vin)
+	reqURL := fmt.Sprintf("%s/commerce/v1/accounts/%s/kamereon/kca/car-adapter/v1/cars/%s/hvac-status?country=PL",
+		r.kamereonURL, accountID, vin)
+
+	req, _ := http.NewRequest("GET", reqURL, nil)
+	req.Header.Set("x-gigya-id_token", jwt)
+	req.Header.Set("apikey", kamereonAPIKey)
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hvac status: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("hvac status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data struct {
+			Attributes HvacStatus `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("hvac status decode: %w", err)
+	}
+
+	return &result.Data.Attributes, nil
+}
+
+// getLocation fetches the vehicle's GPS position. Not supported on all models
+// (e.g. Zoe returns 403), so callers treat it as best-effort.
+func (r *Renault) getLocation(vin string) (*LocationStatus, error) {
+	r.mu.RLock()
+	accountID := r.accountID
+	jwt := r.jwt
+	r.mu.RUnlock()
+
+	vin = strings.ToUpper(vin)
+	reqURL := fmt.Sprintf("%s/commerce/v1/accounts/%s/kamereon/kca/car-adapter/v1/cars/%s/location?country=PL",
+		r.kamereonURL, accountID, vin)
+
+	req, _ := http.NewRequest("GET", reqURL, nil)
+	req.Header.Set("x-gigya-id_token", jwt)
+	req.Header.Set("apikey", kamereonAPIKey)
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("location: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("location %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Data struct {
+			Attributes LocationStatus `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("location decode: %w", err)
+	}
+
+	return &result.Data.Attributes, nil
+}
+
+// buildABRPTelemetry assembles an ABRP telemetry frame from a battery-status
+// response plus best-effort hvac/location data (either may be nil). It is a pure
+// function (no I/O) so the field-mapping logic stays unit-testable.
+func buildABRPTelemetry(status *BatteryStatus, hvac *HvacStatus, loc *LocationStatus, capacityKwh, odometerKm float64) abrp.Telemetry {
+	f := func(v float64) *float64 { return &v }
+
+	charging := status.ChargingStatus == 1.0
+	tlm := abrp.Telemetry{
+		UTC: time.Now().Unix(),
+		SoC: float64(status.Level),
+	}
+	if charging {
+		tlm.IsCharging = 1
+	}
+
+	// is_parked: plugged in or charging implies the car is stationary. Renault
+	// exposes no ignition/speed signal, so we only assert parked when confident
+	// and otherwise leave the field absent.
+	if status.PlugStatus == 1 || charging {
+		one := 1
+		tlm.IsParked = &one
+	}
+
+	// Charging power. Renault reports chargingInstantaneousPower in W on some
+	// models and kW on others; auto-detect by magnitude (no EV draws >=1 MW, and
+	// sub-kW "charging" is negligible). ABRP expects negative power for charging.
+	if charging && status.ChargingInstantaneousPower != nil {
+		p := *status.ChargingInstantaneousPower
+		if p >= 1000 {
+			p /= 1000 // W → kW
+		}
+		tlm.Power = f(-p)
+	}
+
+	if status.Autonomy > 0 {
+		tlm.EstRange = f(float64(status.Autonomy))
+	}
+	if capacityKwh > 0 {
+		tlm.Capacity = f(capacityKwh)
+	}
+	if status.BatteryTemperature != nil {
+		tlm.BattTemp = f(*status.BatteryTemperature)
+	}
+	if hvac != nil && hvac.ExternalTemperature != nil {
+		tlm.ExtTemp = f(*hvac.ExternalTemperature)
+	}
+	if loc != nil && (loc.GPSLatitude != 0 || loc.GPSLongitude != 0) {
+		tlm.Lat = f(loc.GPSLatitude)
+		tlm.Lon = f(loc.GPSLongitude)
+	}
+	if odometerKm > 0 {
+		tlm.Odometer = f(odometerKm)
+	}
+	return tlm
+}
+
+// pushABRP gathers best-effort telemetry (ambient temperature, GPS) on top of
+// the already-fetched battery status and forwards it to ABRP. Called at the end
+// of a successful poll, only when ABRP is enabled. Best-effort sources that fail
+// are simply omitted; they never fail the push.
+func (r *Renault) pushABRP(ac *abrp.Client, vin string, status *BatteryStatus, odometerKm float64) {
+	hvac, err := r.getHvacStatus(vin)
+	if err != nil {
+		r.log.Debug("abrp: hvac-status unavailable", "err", err)
+		hvac = nil
+	}
+	loc, err := r.getLocation(vin)
+	if err != nil {
+		r.log.Debug("abrp: location unavailable", "err", err)
+		loc = nil
+	}
+
+	capacity := r.store.GetFloat("scheduler.battery_capacity", 0)
+	tlm := buildABRPTelemetry(status, hvac, loc, capacity, odometerKm)
+
+	if err := ac.Send(context.Background(), tlm); err != nil {
+		r.log.Warn("abrp: send failed", "err", err)
+	}
 }
 
 func (r *Renault) shouldRefreshDetails() bool {

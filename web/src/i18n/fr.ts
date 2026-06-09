@@ -201,6 +201,8 @@ const fr: Translations = {
   'settings.confirmAction': 'Confirmer\u00a0?',
   'settings.tariff': 'Tarif',
   'settings.pstrykToken': 'Token API Pstryk',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': 'Jeton ABRP',
   'settings.energyMeter': '\u00c9nergie compteur',
   'settings.meterUrl': 'URL du compteur',
   'settings.pollInterval': 'Intervalle de sondage (s)',

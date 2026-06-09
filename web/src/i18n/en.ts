@@ -230,6 +230,8 @@ const en = {
   'settings.confirmAction': 'Confirm?',
   'settings.tariff': 'Tariff',
   'settings.pstrykToken': 'Pstryk API Token',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': 'ABRP Token',
   'settings.energyMeter': 'Energy Meter',
   'settings.meterUrl': 'Meter URL',
   'settings.pollInterval': 'Poll Interval (s)',

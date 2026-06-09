@@ -201,6 +201,8 @@ const lv: Translations = {
   'settings.confirmAction': 'Apstiprin\u0101t?',
   'settings.tariff': 'Tarifs',
   'settings.pstrykToken': 'Pstryk API tokens',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': 'ABRP tokens',
   'settings.energyMeter': 'Ener\u0123ijas skait\u012bt\u0101js',
   'settings.meterUrl': 'Skait\u012bt\u0101ja URL',
   'settings.pollInterval': 'Aptaujas interv\u0101ls (s)',

@@ -7,6 +7,7 @@ const (
 	// fetches stay on SourceTariff so existing event-log filters keep working.
 	SourcePstryk  Source = "pstryk"
 	SourceRenault Source = "renault"
+	SourceABRP    Source = "abrp"
 	SourceMeter   Source = "meter"
 	SourceZappi   Source = "zappi"
 	SourceOCPP    Source = "ocpp"

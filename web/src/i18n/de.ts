@@ -201,6 +201,8 @@ const de: Translations = {
   'settings.confirmAction': 'Best\u00e4tigen?',
   'settings.tariff': 'Tarif',
   'settings.pstrykToken': 'Pstryk-API-Token',
+  'settings.abrp': 'ABRP',
+  'settings.abrpToken': 'ABRP-Token',
   'settings.energyMeter': 'Energiez\u00e4hler',
   'settings.meterUrl': 'Z\u00e4hler-URL',
   'settings.pollInterval': 'Abfrageintervall (s)',
