@@ -379,7 +379,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
               <polyline
                 points={consumptionPoints.map((p) => `${p.x},${p.y}`).join(' ')}
                 fill="none"
-                stroke="rgba(33, 150, 243, 0.9)"
+                stroke="rgba(10, 132, 255, 0.9)"
                 strokeWidth="2"
                 vectorEffect="non-scaling-stroke"
                 strokeLinejoin="round"

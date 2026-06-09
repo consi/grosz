@@ -18,7 +18,7 @@ interface Props {
 function socBarColor(soc: number, minSoc: number, skipAboveSoc: number): string {
   if (minSoc > 0 && soc < minSoc) return 'var(--danger)';
   if (skipAboveSoc > 0 && soc >= skipAboveSoc) return 'var(--primary)';
-  return '#ff9800';
+  return '#ff9f0a';
 }
 
 function near(a: number, b: number): boolean {
@@ -36,7 +36,7 @@ export function CarStatus({ soc, minSoc, skipAboveSoc, batteryAutonomy, charging
     if (near(chargingStatus, 1.0)) return { label: t('car.chargingStatusCharging'), color: 'var(--primary)' };
     if (near(chargingStatus, 0.2)) return { label: t('car.chargingStatusComplete'), color: 'var(--primary)' };
     if (near(chargingStatus, 0.1)) return { label: t('car.chargingStatusScheduled'), color: 'var(--muted)' };
-    if (near(chargingStatus, 0.3)) return { label: t('car.chargingStatusWaiting'), color: '#ff9800' };
+    if (near(chargingStatus, 0.3)) return { label: t('car.chargingStatusWaiting'), color: '#ff9f0a' };
     if (near(chargingStatus, -1.0)) return { label: t('car.chargingStatusError'), color: 'var(--danger)' };
     if (near(chargingStatus, -1.1)) return { label: t('car.chargingStatusUnavailable'), color: 'var(--muted)' };
     return { label: t('car.chargingStatusNotCharging'), color: 'var(--muted)' };

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { Login } from './components/Login';
 import { ChargerStatus } from './components/ChargerStatus';
 import { PriceChart, type ChartMarker } from './components/PriceChart';
@@ -14,7 +14,7 @@ import { RenaultReauthBanner } from './components/RenaultReauthBanner';
 import { useSSE } from './hooks/useSSE';
 import { usePullToRefresh } from './hooks/usePullToRefresh';
 import { I18nProvider, useTranslation, browserLocale } from './i18n';
-import type { Locale } from './i18n';
+import type { Locale, TranslationKey } from './i18n';
 import type { StatusResponse, Rate, HourlyEnergy, MeterLive } from './types';
 import './App.css';
 
@@ -22,13 +22,36 @@ type Tab = 'dashboard' | 'reporting' | 'log' | 'syslog' | 'settings';
 
 const validTabs: Tab[] = ['dashboard', 'reporting', 'log', 'syslog', 'settings'];
 
+// Feather-style outline icons (24x24, stroked with currentColor).
+const TABS: { id: Tab; labelKey: TranslationKey; icon: ReactNode }[] = [
+  {
+    id: 'dashboard', labelKey: 'nav.dashboard',
+    icon: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
+  },
+  {
+    id: 'reporting', labelKey: 'nav.reporting',
+    icon: <><line x1="18" y1="20" x2="18" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="6" y1="20" x2="6" y2="14" /></>,
+  },
+  {
+    id: 'log', labelKey: 'nav.ocppLog',
+    icon: <><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></>,
+  },
+  {
+    id: 'syslog', labelKey: 'nav.systemLog',
+    icon: <><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></>,
+  },
+  {
+    id: 'settings', labelKey: 'nav.settings',
+    icon: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></>,
+  },
+];
+
 function tabFromHash(): Tab {
   const h = location.hash.replace('#', '') as Tab;
   return validTabs.includes(h) ? h : 'dashboard';
 }
 
 function App() {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [passkeysAvailable, setPasskeysAvailable] = useState(false);
   const [tab, setTab] = useState<Tab>(tabFromHash);
@@ -333,7 +356,6 @@ function App() {
         tab={tab} setTab={setTab}
         renaultTfaAutoStart={renaultTfaAutoStart}
         onRenaultTfaAutoStartConsumed={() => setRenaultTfaAutoStart(false)}
-        menuOpen={menuOpen} setMenuOpen={setMenuOpen}
         status={status} rates={rates} consumption={consumption}
         meterLive={meterLive} chartMarkers={chartMarkers}
         timezone={timezone} locale={locale} setLocale={setLocale}
@@ -354,7 +376,7 @@ function App() {
 }
 
 function AppContent({
-  tab, setTab, menuOpen, setMenuOpen,
+  tab, setTab,
   status, rates, consumption, meterLive, chartMarkers,
   timezone, locale, setLocale,
   pulling, pullDistance, refreshing,
@@ -365,7 +387,6 @@ function AppContent({
   onCreateOverride, onDeleteOverride, onLogout,
 }: {
   tab: Tab; setTab: (t: Tab) => void;
-  menuOpen: boolean; setMenuOpen: (o: boolean | ((p: boolean) => boolean)) => void;
   status: StatusResponse; rates: Rate[]; consumption: HourlyEnergy[];
   meterLive: MeterLive | null; chartMarkers: ChartMarker[];
   timezone: string; locale: Locale; setLocale: (l: Locale) => void;
@@ -386,28 +407,15 @@ function AppContent({
   return (
     <div className="app">
       <header>
-        <h1 onClick={() => { setTab('dashboard'); setMenuOpen(false); }}>grosz</h1>
-        <button className="hamburger" onClick={() => setMenuOpen((o: boolean) => !o)} aria-label={t('nav.menu')}>
-          <span /><span /><span />
-        </button>
-        <nav className={menuOpen ? 'open' : ''}>
-          <button className={tab === 'dashboard' ? 'active' : ''} onClick={() => { setTab('dashboard'); setMenuOpen(false); }}>
-            {t('nav.dashboard')}
-          </button>
-          <button className={tab === 'reporting' ? 'active' : ''} onClick={() => { setTab('reporting'); setMenuOpen(false); }}>
-            {t('nav.reporting')}
-          </button>
-          <button className={tab === 'log' ? 'active' : ''} onClick={() => { setTab('log'); setMenuOpen(false); }}>
-            {t('nav.ocppLog')}
-          </button>
-          <button className={tab === 'syslog' ? 'active' : ''} onClick={() => { setTab('syslog'); setMenuOpen(false); }}>
-            {t('nav.systemLog')}
-          </button>
-          <button className={tab === 'settings' ? 'active' : ''} onClick={() => { setTab('settings'); setMenuOpen(false); }}>
-            {t('nav.settings')}
-          </button>
-          <button className="logout-btn" onClick={onLogout}>{t('nav.logout')}</button>
+        <h1 onClick={() => setTab('dashboard')}>grosz</h1>
+        <nav>
+          {TABS.map((ti) => (
+            <button key={ti.id} className={tab === ti.id ? 'active' : ''} onClick={() => setTab(ti.id)}>
+              {t(ti.labelKey)}
+            </button>
+          ))}
         </nav>
+        <button className="logout-btn" onClick={onLogout}>{t('nav.logout')}</button>
       </header>
 
       {(pulling || refreshing) && (
@@ -468,6 +476,23 @@ function AppContent({
         {tab === 'syslog' && <SystemLog refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} renaultTfaAutoStart={renaultTfaAutoStart} onRenaultTfaAutoStartConsumed={onRenaultTfaAutoStartConsumed} />}
       </main>
+      {/* Fixed-position bar: must stay outside <main>, whose pull-to-refresh
+          transform would otherwise become its containing block. */}
+      <nav className="tab-bar" aria-label={t('nav.menu')}>
+        {TABS.map((ti) => (
+          <button
+            key={ti.id}
+            className={`tab-item ${tab === ti.id ? 'active' : ''}`}
+            onClick={() => setTab(ti.id)}
+            aria-current={tab === ti.id ? 'page' : undefined}
+          >
+            <svg className="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {ti.icon}
+            </svg>
+            <span className="tab-label">{t(ti.labelKey)}</span>
+          </button>
+        ))}
+      </nav>
       <AppFooter versionInfo={versionInfo} />
     </div>
   );

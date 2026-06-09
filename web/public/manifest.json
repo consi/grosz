@@ -3,8 +3,8 @@
   "short_name": "grosz",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1a1a2e",
-  "theme_color": "#1a1a2e",
+  "background_color": "#050507",
+  "theme_color": "#050507",
   "icons": [
     {
       "src": "/icon-192.png",

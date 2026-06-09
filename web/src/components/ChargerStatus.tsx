@@ -27,12 +27,12 @@ function deriveCarState(status: string): CarState {
 }
 
 const carStateColors: Record<CarState, string> = {
-  unplugged: '#9e9e9e',
-  plugged: '#ff9800',
-  charging: '#4caf50',
-  suspended: '#9c27b0',
-  error: '#f44336',
-  offline: '#616161',
+  unplugged: '#98989d',
+  plugged: '#ff9f0a',
+  charging: '#30d158',
+  suspended: '#bf5af2',
+  error: '#ff453a',
+  offline: '#636366',
 };
 
 const carStateIcons: Record<CarState, string> = {
