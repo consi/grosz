@@ -1,6 +1,7 @@
 package vehicle
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -91,6 +92,18 @@ type HvacStatus struct {
 type LocationStatus struct {
 	GPSLatitude  float64 `json:"gpsLatitude"`
 	GPSLongitude float64 `json:"gpsLongitude"`
+}
+
+// SocLevel holds the car-side charge limits exposed by the newer Kamereon "KCM"
+// ev/soc-level endpoint. SocTarget is the charge limit the vehicle enforces
+// (charging stops there); SocMin is the lower bound. Only available on newer KCM
+// models (e.g. Megane E-Tech, Scenic, R5); older KCA-only cars (Zoe) return
+// 404/403, so callers treat it as best-effort and fall back to the local
+// Fallback Target SoC setting.
+type SocLevel struct {
+	SocMin                    int    `json:"socMin"`
+	SocTarget                 int    `json:"socTarget"`
+	LastEnergyUpdateTimestamp string `json:"lastEnergyUpdateTimestamp"`
 }
 
 // Renault polls the MyRenault/Kamereon API for battery SoC.
@@ -290,6 +303,20 @@ func (r *Renault) poll(user, pass, vin string) error {
 			Mileage:   cockpit.TotalMileage,
 		}); err != nil {
 			r.log.Warn("failed to store odometer reading", "err", err)
+		}
+	}
+
+	// Fetch the car-side charge limit (newer KCM models only). Best-effort:
+	// unsupported models error out and the scheduler/dashboard fall back to the
+	// local Fallback Target SoC setting.
+	if lvl, err := r.getSocLevel(vin); err != nil {
+		r.log.Debug("soc-level unavailable", "err", err)
+	} else {
+		if lvl.SocTarget > 0 {
+			_ = r.store.Set("vehicle.soc_target", fmt.Sprintf("%d", lvl.SocTarget))
+		}
+		if lvl.SocMin > 0 {
+			_ = r.store.Set("vehicle.soc_min", fmt.Sprintf("%d", lvl.SocMin))
 		}
 	}
 
@@ -601,6 +628,137 @@ func (r *Renault) getBatteryStatus(vin string) (*BatteryStatus, error) {
 	}
 
 	return &result.Data.Attributes, nil
+}
+
+// getSocLevel reads the car's charge limits from the newer Kamereon KCM
+// ev/soc-level endpoint. Best-effort: unsupported on older (KCA-only) models,
+// which return 404/403, so the caller falls back to the local Fallback Target
+// SoC setting.
+func (r *Renault) getSocLevel(vin string) (*SocLevel, error) {
+	r.mu.RLock()
+	accountID := r.accountID
+	jwt := r.jwt
+	r.mu.RUnlock()
+
+	vin = strings.ToUpper(vin)
+	reqURL := fmt.Sprintf("%s/commerce/v1/accounts/%s/kamereon/kcm/v1/vehicles/%s/ev/soc-level?country=PL",
+		r.kamereonURL, accountID, vin)
+
+	req, _ := http.NewRequest("GET", reqURL, nil)
+	req.Header.Set("x-gigya-id_token", jwt)
+	req.Header.Set("apikey", kamereonAPIKey)
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("soc-level: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("soc-level %d: %s", resp.StatusCode, string(body))
+	}
+
+	// KCM wraps attributes in data.attributes like the KCA endpoints do.
+	var result struct {
+		Data struct {
+			Attributes SocLevel `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("soc-level decode: %w", err)
+	}
+
+	return &result.Data.Attributes, nil
+}
+
+// SetSocTarget writes the car-side charge limit (socTarget, a percentage) via
+// the KCM ev/soc-level endpoint, preserving the car's current socMin. The caller
+// is responsible for clamping target to a sensible range (30–100). Only
+// supported on newer KCM models; older cars return an error and the caller keeps
+// the local fallback.
+//
+// NOTE: the write contract for ev/soc-level is not published in
+// hacf-fr/renault-api (only the GET is). We send a JSON:API body
+// {"data":{"type":"Soc","attributes":{"socMin":..,"socTarget":..}}} via PUT,
+// matching the data/attributes shape the GET returns and the KCM POST actions
+// use. If a real capture shows a different method or type, adjust putSocLevel.
+func (r *Renault) SetSocTarget(target int) error {
+	user := r.store.GetDefault("vehicle.renault_user", "")
+	pass := r.store.GetDefault("vehicle.renault_password", "")
+	vin := r.store.GetDefault("vehicle.vin", "")
+	if user == "" || pass == "" || vin == "" {
+		return fmt.Errorf("renault credentials not configured")
+	}
+	if err := r.ensureAuth(user, pass); err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+
+	// Preserve the car's current minimum. Prefer a fresh read; fall back to the
+	// last stored value so a transient read failure doesn't blank socMin.
+	socMin := r.store.GetInt("vehicle.soc_min", 0)
+	if lvl, err := r.getSocLevel(vin); err == nil {
+		socMin = lvl.SocMin
+	}
+
+	if err := r.putSocLevel(vin, socMin, target); err != nil {
+		// JWT might be expired; re-auth once and retry, mirroring poll().
+		r.mu.Lock()
+		r.jwt = ""
+		r.mu.Unlock()
+		if err2 := r.ensureAuth(user, pass); err2 != nil {
+			return fmt.Errorf("re-auth: %w", err2)
+		}
+		if err2 := r.putSocLevel(vin, socMin, target); err2 != nil {
+			return err2
+		}
+	}
+
+	_ = r.store.Set("vehicle.soc_target", fmt.Sprintf("%d", target))
+	if socMin > 0 {
+		_ = r.store.Set("vehicle.soc_min", fmt.Sprintf("%d", socMin))
+	}
+	r.log.Info("charge limit set on Renault", "socTarget", target, "socMin", socMin)
+	return nil
+}
+
+func (r *Renault) putSocLevel(vin string, socMin, socTarget int) error {
+	r.mu.RLock()
+	accountID := r.accountID
+	jwt := r.jwt
+	r.mu.RUnlock()
+
+	vin = strings.ToUpper(vin)
+	reqURL := fmt.Sprintf("%s/commerce/v1/accounts/%s/kamereon/kcm/v1/vehicles/%s/ev/soc-level?country=PL",
+		r.kamereonURL, accountID, vin)
+
+	body, _ := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"type": "Soc",
+			"attributes": map[string]any{
+				"socMin":    socMin,
+				"socTarget": socTarget,
+			},
+		},
+	})
+
+	req, _ := http.NewRequest("PUT", reqURL, bytes.NewReader(body))
+	req.Header.Set("x-gigya-id_token", jwt)
+	req.Header.Set("apikey", kamereonAPIKey)
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("set soc-level: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("set soc-level %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 func (r *Renault) getCockpitStatus(vin string) (*CockpitStatus, error) {

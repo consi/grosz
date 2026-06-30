@@ -55,7 +55,7 @@ function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [passkeysAvailable, setPasskeysAvailable] = useState(false);
   const [tab, setTab] = useState<Tab>(tabFromHash);
-  const [status, setStatus] = useState<StatusResponse>({ chargePoints: [], charging: false, mode: 'schedule', soc: 0, minSoc: 0, skipAboveSoc: 0, deadlineTime: '07:00', batteryAutonomy: 0, chargingStatus: 0, plugStatus: 0, chargingRemainingTime: 0 });
+  const [status, setStatus] = useState<StatusResponse>({ chargePoints: [], charging: false, mode: 'schedule', soc: 0, minSoc: 0, skipAboveSoc: 0, socTarget: 0, deadlineTime: '07:00', batteryAutonomy: 0, chargingStatus: 0, plugStatus: 0, chargingRemainingTime: 0 });
   const [rates, setRates] = useState<Rate[]>([]);
   const [consumption, setConsumption] = useState<HourlyEnergy[]>([]);
   const [meterLive, setMeterLive] = useState<MeterLive | null>(null);
@@ -266,6 +266,25 @@ function App() {
     apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
   };
 
+  // handleSocTargetChange writes the car's charge limit to the Renault API. The
+  // CarStatus stepper owns the +/- UI and debounce; this just performs the PUT
+  // and refetches status. Returns whether the write succeeded so the stepper can
+  // show a saved/error hint.
+  const handleSocTargetChange = async (target: number): Promise<boolean> => {
+    try {
+      const resp = await apiFetch('/api/car/soc-target', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+      if (!resp.ok) return false;
+      apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const handleScheduleApply = async () => {
     await apiFetch('/api/schedule', { method: 'POST' }).catch(() => null);
     apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
@@ -363,6 +382,7 @@ function App() {
         modeError={modeError} refreshKey={refreshKey}
         defaultPowerW={defaultPowerW}
         onModeChange={handleModeChange}
+        onSocTargetChange={handleSocTargetChange}
         onScheduleApply={handleScheduleApply}
         onScheduleCancel={handleScheduleCancel}
         onSlotCancel={handleSlotCancel}
@@ -383,7 +403,7 @@ function AppContent({
   modeError, refreshKey,
   defaultPowerW, versionInfo,
   renaultTfaAutoStart, onRenaultTfaAutoStartConsumed,
-  onModeChange, onScheduleApply, onScheduleCancel, onSlotCancel, onSlotRestore,
+  onModeChange, onSocTargetChange, onScheduleApply, onScheduleCancel, onSlotCancel, onSlotRestore,
   onCreateOverride, onDeleteOverride, onLogout,
 }: {
   tab: Tab; setTab: (t: Tab) => void;
@@ -396,6 +416,7 @@ function AppContent({
   versionInfo: { version: string; commit: string; bootId: string } | null;
   renaultTfaAutoStart: boolean; onRenaultTfaAutoStartConsumed: () => void;
   onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
+  onSocTargetChange: (target: number) => Promise<boolean>;
   onScheduleApply: () => void; onScheduleCancel: () => void;
   onSlotCancel: (date: string) => void; onSlotRestore: (date: string) => void;
   onCreateOverride: (payload: { kind: 'force' | 'block'; start: string; end: string; powerW: number }) => Promise<{ ok: boolean; error?: string }>;
@@ -444,6 +465,7 @@ function AppContent({
                 soc={status.soc}
                 minSoc={status.minSoc}
                 skipAboveSoc={status.skipAboveSoc}
+                socTarget={status.socTarget}
                 batteryAutonomy={status.batteryAutonomy}
                 chargingStatus={status.chargingStatus}
                 plugStatus={status.plugStatus}
@@ -452,6 +474,7 @@ function AppContent({
                 vehicleModel={status.vehicleModel}
                 vehiclePicture={status.vehiclePicture}
                 mileage={status.mileage}
+                onSocTargetChange={onSocTargetChange}
               />
               <ScheduleForm
                 schedule={status.schedule}

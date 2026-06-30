@@ -129,6 +129,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("GET /api/renault/tfa/status", s.requireAuth(s.handleRenaultTFAStatus))
 	mux.HandleFunc("POST /api/renault/tfa/start", s.requireAuth(s.handleRenaultTFAStart))
 	mux.HandleFunc("POST /api/renault/tfa/verify", s.requireAuth(s.handleRenaultTFAVerify))
+	mux.HandleFunc("PUT /api/car/soc-target", s.requireAuth(s.handleSetSocTarget))
 
 	// Static files (SPA)
 	staticFS, err := fs.Sub(staticFiles, "dist")
@@ -220,6 +221,7 @@ func (s *Server) buildStatus() any {
 		SoC                   float64                   `json:"soc"`
 		MinSoC                float64                   `json:"minSoc"`
 		SkipAboveSoC          float64                   `json:"skipAboveSoc"`
+		SocTarget             float64                   `json:"socTarget"`
 		SkipReason            string                    `json:"skipReason,omitempty"`
 		SkipReasonKey         string                    `json:"skipReasonKey,omitempty"`
 		SkipReasonParams      map[string]string         `json:"skipReasonParams,omitempty"`
@@ -313,6 +315,7 @@ func (s *Server) buildStatus() any {
 		SoC:                   s.store.GetFloat("scheduler.current_soc", 0),
 		MinSoC:                s.store.GetFloat("scheduler.min_soc", 0),
 		SkipAboveSoC:          s.store.GetFloat("scheduler.skip_above_soc", 0),
+		SocTarget:             scheduler.EffectiveTargetSoC(s.store),
 		SkipReason:            skipReason,
 		SkipReasonKey:         skipReasonKey,
 		SkipReasonParams:      skipReasonParams,

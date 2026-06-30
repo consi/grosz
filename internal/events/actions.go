@@ -68,6 +68,7 @@ const (
 	ActionRenaultPoll      Action = "poll"
 	ActionVehicleDetails   Action = "vehicleDetails"
 	ActionRenaultTFA       Action = "tfa"
+	ActionRenaultSocTarget Action = "socTarget"
 )
 
 // abrp

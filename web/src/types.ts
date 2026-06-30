@@ -66,6 +66,7 @@ export interface StatusResponse {
   soc: number;
   minSoc: number;
   skipAboveSoc: number;
+  socTarget: number;
   skipReason?: string;
   skipReasonKey?: string;
   skipReasonParams?: Record<string, string>;

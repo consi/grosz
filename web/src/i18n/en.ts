@@ -105,6 +105,10 @@ const en = {
   'car.remainingMin': '{m}min',
   'car.remainingHour': '{h}h',
   'car.remainingHourMin': '{h}h {m}min',
+  'car.chargeLimit': 'Charge Limit',
+  'car.chargeLimitSaving': 'Saving…',
+  'car.chargeLimitSaved': 'Saved',
+  'car.chargeLimitError': 'Failed to update charge limit',
 
   // Schedule
   'schedule.heading': 'Charging Schedule',
@@ -245,7 +249,7 @@ const en = {
   'settings.chargeHeadroom': 'Charge Headroom (%)',
   'settings.scheduler': 'Scheduler',
   'settings.enabled': 'Enabled',
-  'settings.targetSoc': 'Target SoC (%)',
+  'settings.targetSoc': 'Fallback Target SoC (%)',
   'settings.skipAboveSoc': 'Skip If SoC Above (%)',
   'settings.minSoc': 'Min SoC (%, ignore max price below this)',
   'settings.maxPrice': 'Max Price (PLN/kWh, 0=no limit)',

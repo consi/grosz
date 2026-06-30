@@ -1426,6 +1426,17 @@ func (s *Scheduler) recompute() {
 	s.fireOnRecompute()
 }
 
+// EffectiveTargetSoC returns the charge limit (target state of charge, %) to aim
+// for: the live value read from the car (vehicle.soc_target) when available,
+// otherwise the local scheduler.target_soc setting, which acts as a fallback
+// when the Renault API doesn't provide one (older models, transient failures).
+func EffectiveTargetSoC(st *store.Store) float64 {
+	if v := st.GetFloat("vehicle.soc_target", 0); v > 0 {
+		return v
+	}
+	return st.GetFloat("scheduler.target_soc", 0)
+}
+
 func (s *Scheduler) configFromStore() *Config {
 	deadlineStr := s.store.GetDefault("scheduler.deadline_time", "07:00")
 	deadline := nextDeadline(deadlineStr)
@@ -1435,7 +1446,7 @@ func (s *Scheduler) configFromStore() *Config {
 		MaxPower:        s.store.GetFloat("charger.max_power", 11000),
 		MinPower:        s.store.GetFloat("charger.min_power", 1380),
 		BatteryCapacity: s.store.GetFloat("scheduler.battery_capacity", 0),
-		TargetSoC:       s.store.GetFloat("scheduler.target_soc", 0),
+		TargetSoC:       EffectiveTargetSoC(s.store),
 		SkipAboveSoC:    s.store.GetFloat("scheduler.skip_above_soc", 0),
 		MinSoC:          s.store.GetFloat("scheduler.min_soc", 0),
 		CurrentSoC:      s.store.GetFloat("scheduler.current_soc", 0),

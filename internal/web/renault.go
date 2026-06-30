@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/vehicle"
 )
 
@@ -64,5 +65,47 @@ func (s *Server) handleRenaultTFAVerify(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleSetSocTarget writes the car's charge limit (target SoC) to the Renault
+// API via Kamereon. The value is clamped to 30–100% (matching the Dashboard
+// stepper). On success the scheduler config is reloaded so the new live target
+// feeds the next recompute, and the change is recorded in the system log.
+func (s *Server) handleSetSocTarget(w http.ResponseWriter, r *http.Request) {
+	if s.renault == nil {
+		http.Error(w, "renault not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Target int `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Target < 30 || req.Target > 100 {
+		http.Error(w, "target must be between 30 and 100", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.renault.SetSocTarget(req.Target); err != nil {
+		s.web.Warn(events.ActionRenaultSocTarget,
+			map[string]any{"target": req.Target},
+			map[string]any{"error": err.Error()},
+		)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Pick up the new live charge limit on the next scheduler recompute instead
+	// of waiting for the periodic poll.
+	if s.scheduler != nil {
+		s.scheduler.ReloadConfig()
+	}
+
+	s.web.Info(events.ActionRenaultSocTarget,
+		map[string]any{"target": req.Target}, nil,
+	)
 	writeJSON(w, map[string]any{"ok": true})
 }

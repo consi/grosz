@@ -146,7 +146,7 @@ func (s *Server) handleSetSchedule(w http.ResponseWriter, r *http.Request) {
 		MaxPower:        s.store.GetFloat("charger.max_power", 11000),
 		MinPower:        s.store.GetFloat("charger.min_power", 1380),
 		BatteryCapacity: s.store.GetFloat("scheduler.battery_capacity", 0),
-		TargetSoC:       s.store.GetFloat("scheduler.target_soc", 0),
+		TargetSoC:       scheduler.EffectiveTargetSoC(s.store),
 		SkipAboveSoC:    s.store.GetFloat("scheduler.skip_above_soc", 0),
 		CurrentSoC:      s.store.GetFloat("scheduler.current_soc", 0),
 		MaxPrice:        s.store.GetFloat("scheduler.max_price", 0),
