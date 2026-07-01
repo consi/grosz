@@ -147,8 +147,10 @@ func TestGetLocationBestEffort403(t *testing.T) {
 	require.Error(t, err) // caller (pushABRP) treats this as best-effort: logs and continues
 }
 
-// TestPushABRPEndToEnd exercises the full chain: best-effort hvac/location
-// fetches, capacity from settings, telemetry assembly, and the ABRP send.
+// TestPushABRPEndToEnd exercises the assembly chain: fresh battery status plus
+// the best-effort cached climate/GPS/odometer, capacity from settings, telemetry
+// assembly, and the ABRP send. hvac/location are no longer fetched by the push —
+// they are supplied from the cache the soc-level tier maintains.
 func TestPushABRPEndToEnd(t *testing.T) {
 	var gotTLM string
 	abrpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,33 +160,19 @@ func TestPushABRPEndToEnd(t *testing.T) {
 	}))
 	defer abrpSrv.Close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v1/cars/TESTVIN/hvac-status",
-		func(w http.ResponseWriter, r *http.Request) {
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": map[string]any{"attributes": map[string]any{"externalTemperature": 8.0}},
-			})
-		})
-	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v1/cars/TESTVIN/location",
-		func(w http.ResponseWriter, r *http.Request) {
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": map[string]any{"attributes": map[string]any{"gpsLatitude": 52.0, "gpsLongitude": 21.0}},
-			})
-		})
-	renSrv := httptest.NewServer(mux)
-	defer renSrv.Close()
-
 	st := testStore(t)
 	require.NoError(t, st.Set("abrp.token", "tok"))
 	require.NoError(t, st.Set("scheduler.battery_capacity", "52"))
-	r := testRenault(t, st, renSrv.URL)
+	r := testRenault(t, st, "http://unused")
 	ac := abrp.NewWithURL(st, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), abrpSrv.URL)
 
 	status := &BatteryStatus{
 		Level: 65, Autonomy: 210, PlugStatus: 1, ChargingStatus: 1.0,
 		ChargingInstantaneousPower: fptr(11000), BatteryTemperature: fptr(20),
 	}
-	r.pushABRP(ac, "testvin", status, 30000)
+	hvac := &HvacStatus{ExternalTemperature: fptr(8.0)}
+	loc := &LocationStatus{GPSLatitude: 52.0, GPSLongitude: 21.0}
+	r.pushABRP(ac, status, hvac, loc, 30000)
 
 	require.NotEmpty(t, gotTLM, "ABRP server should have received a tlm payload")
 	var tlm map[string]any

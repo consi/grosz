@@ -35,46 +35,48 @@ var (
 
 // Default settings seeded on first run.
 var defaultSettings = map[string]string{
-	"auth.username":                "admin",
-	"auth.password":                "admin",
-	"auth.session_lifetime_days":   "30",
-	"ocpp.port":                    "8887",
-	"ocpp.path":                    "/{ws}",
-	"ocpp.auth_key":                "",
-	"zappi.charge_box_id":          "",
-	"zappi.commercial_mode":        "true",
-	"zappi.id_tag":                 "grosz",
-	"zappi.meter_interval":         "10",
-	"zappi.charger_name":           "",
-	"zappi.charge_id":              "",
-	"zappi.qr_url":                 "",
-	"charger.max_power":            "11000",
-	"charger.min_power":            "1380",
-	"charger.phases":               "3",
-	"charger.status_check_minutes": "25",
-	"tariff.pstryk_token":          "",
-	"abrp.token":                   "",
-	"scheduler.enabled":            "true",
-	"scheduler.target_energy":      "30",
-	"scheduler.deadline_time":      "07:00",
-	"scheduler.battery_capacity":   "0",
-	"scheduler.target_soc":         "0",
-	"scheduler.skip_above_soc":     "0",
-	"scheduler.min_soc":            "0",
-	"scheduler.current_soc":        "0",
-	"scheduler.max_price":          "0",
-	"scheduler.charge_headroom":    "3",
-	"vehicle.renault_user":         "",
-	"vehicle.renault_password":     "",
-	"vehicle.vin":                  "",
-	"vehicle.poll_interval":        "15",
-	"vehicle.require_plug_check":   "false",
-	"charger.mode":                 "schedule",
-	"meter.url":                    "",
-	"meter.interval":               "5",
-	"web.port":                     "3000",
-	"log.level":                    "info",
-	"log.format":                   "text",
+	"auth.username":                   "admin",
+	"auth.password":                   "admin",
+	"auth.session_lifetime_days":      "30",
+	"ocpp.port":                       "8887",
+	"ocpp.path":                       "/{ws}",
+	"ocpp.auth_key":                   "",
+	"zappi.charge_box_id":             "",
+	"zappi.commercial_mode":           "true",
+	"zappi.id_tag":                    "grosz",
+	"zappi.meter_interval":            "10",
+	"zappi.charger_name":              "",
+	"zappi.charge_id":                 "",
+	"zappi.qr_url":                    "",
+	"charger.max_power":               "11000",
+	"charger.min_power":               "1380",
+	"charger.phases":                  "3",
+	"charger.status_check_minutes":    "25",
+	"tariff.pstryk_token":             "",
+	"abrp.token":                      "",
+	"scheduler.enabled":               "true",
+	"scheduler.target_energy":         "30",
+	"scheduler.deadline_time":         "07:00",
+	"scheduler.battery_capacity":      "0",
+	"scheduler.target_soc":            "0",
+	"scheduler.skip_above_soc":        "0",
+	"scheduler.min_soc":               "0",
+	"scheduler.current_soc":           "0",
+	"scheduler.max_price":             "0",
+	"scheduler.charge_headroom":       "3",
+	"vehicle.renault_user":            "",
+	"vehicle.renault_password":        "",
+	"vehicle.vin":                     "",
+	"vehicle.poll_interval":           "15",
+	"vehicle.poll_interval_unplugged": "30",
+	"vehicle.soc_level_interval":      "30",
+	"vehicle.require_plug_check":      "false",
+	"charger.mode":                    "schedule",
+	"meter.url":                       "",
+	"meter.interval":                  "5",
+	"web.port":                        "3000",
+	"log.level":                       "info",
+	"log.format":                      "text",
 }
 
 func main() {
@@ -191,13 +193,10 @@ func main() {
 			// Every connector-status transition pokes the scheduler so post-stop
 			// "Available"/"Finishing" → "Preparing" sequences are picked up
 			// immediately. Recompute is cheap during an active transaction
-			// (early-return freeze) and otherwise short.
+			// (early-return freeze) and otherwise short. The Renault poll is
+			// driven separately via SetPlugEventHook (real transitions only, and
+			// debounced) to keep Kamereon calls to a minimum.
 			sched.NotifyImmediate()
-			// Renault poll is more expensive; keep it filtered to the
-			// transitions where a fresh SoC reading is most useful.
-			if status == "Preparing" || status == "SuspendedEV" {
-				renaultPoller.Trigger()
-			}
 		})
 		// Defensive belt: a StopTransaction may arrive before any post-stop
 		// StatusNotification (or be relayed by the cloud proxy out of order).
@@ -231,6 +230,13 @@ func main() {
 				sched.NotifyImmediate()
 			}
 		})
+	})
+	// Poll the car shortly after a real socket transition (plug / unplug /
+	// charge-complete). Deduped + debounced inside the poller so periodic status
+	// re-notifications don't hit the rate-limited Kamereon API. Registered
+	// unconditionally so it works even when the scheduler is disabled.
+	srv.SetPlugEventHook(func(_ string, _ int, _, _ string) {
+		renaultPoller.SchedulePlugPoll()
 	})
 	renaultPoller.SetOnUpdate(func(soc int) {
 		if sched != nil {

@@ -113,13 +113,20 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 			switch request.Status {
 			case core.ChargePointStatusPreparing:
 				_ = s.store.InsertChartMarker("plug", ts)
+				// Plug-in: poll the car (after a settle delay) for a fresh SoC/plug.
+				s.firePlugEventHook(chargePointId, request.ConnectorId, fromStatus, newStatus)
 			case core.ChargePointStatusAvailable:
 				// Don't emit "unplug" if we have no prior state (first ever
 				// notification after fresh DB) — we can't claim something was
 				// previously plugged.
 				if prev != nil && prev.Status != "" && prev.Status != string(core.ChargePointStatusAvailable) {
 					_ = s.store.InsertChartMarker("unplug", ts)
+					// Unplug: confirm the disconnect and capture the final SoC.
+					s.firePlugEventHook(chargePointId, request.ConnectorId, fromStatus, newStatus)
 				}
+			case core.ChargePointStatusSuspendedEV:
+				// Charge-complete (battery full / EV paused): grab the final SoC.
+				s.firePlugEventHook(chargePointId, request.ConnectorId, fromStatus, newStatus)
 			}
 		}
 

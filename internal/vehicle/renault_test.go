@@ -3,6 +3,7 @@ package vehicle
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -40,7 +41,9 @@ func testRenault(t *testing.T, st *store.Store, baseURL string) *Renault {
 		gigyaURL:    baseURL,
 		accountID:   "test-account",
 		jwt:         "test-jwt",
+		jwtExpiry:   time.Now().Add(time.Hour), // let ensureAuth short-circuit
 		triggerCh:   make(chan struct{}, 1),
+		plugCh:      make(chan struct{}, 1),
 	}
 	return r
 }
@@ -388,4 +391,326 @@ func TestCompleteTFAWithoutPending(t *testing.T) {
 	err := r.CompleteTFA("123456")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no TFA verification in progress")
+}
+
+// TestSetSocTargetUsesCachedSocMin verifies the write reuses the cached socMin
+// (no extra getSocLevel call) and preserves it in the POST body — the core API
+// saving of the event-based refactor.
+func TestSetSocTargetUsesCachedSocMin(t *testing.T) {
+	var getHits int32
+	var gotSocMin, gotSocTarget int
+
+	mux := http.NewServeMux()
+	// GET soc-level (singular). Must NOT be hit when the cache is warm.
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&getHits, 1)
+			w.WriteHeader(http.StatusNotFound)
+		})
+	// POST soc-levels (plural) — the write endpoint.
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-levels",
+		func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				SocMin    int `json:"socMin"`
+				SocTarget int `json:"socTarget"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotSocMin, gotSocTarget = body.SocMin, body.SocTarget
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"type":"SOC_SYNCH"}`))
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	_ = st.Set("vehicle.renault_user", "u")
+	_ = st.Set("vehicle.renault_password", "p")
+	_ = st.Set("vehicle.vin", "TESTVIN")
+	r := testRenault(t, st, srv.URL)
+	r.setSocLevelCache(18, 70) // warm the cache as the soc-level tier would
+
+	require.NoError(t, r.SetSocTarget(80))
+
+	assert.Equal(t, int32(0), atomic.LoadInt32(&getHits), "SetSocTarget must not read soc-level when the cache is warm")
+	assert.Equal(t, 18, gotSocMin, "POST must preserve the cached socMin")
+	assert.Equal(t, 80, gotSocTarget)
+	assert.Equal(t, 80, st.GetInt("vehicle.soc_target", 0))
+
+	min, known := r.cachedSocMin()
+	assert.True(t, known)
+	assert.Equal(t, 18, min)
+	r.mu.RLock()
+	cachedTarget := r.socTarget
+	r.mu.RUnlock()
+	assert.Equal(t, 80, cachedTarget, "successful write must refresh the target cache")
+}
+
+// TestSetSocTargetRefusesWhenSocMinUnknown verifies that when the car minimum is
+// unknown and the soc-level GET is rate-limited (429), the write is refused
+// rather than POSTing a fabricated socMin=0 that would reset the car's floor.
+func TestSetSocTargetRefusesWhenSocMinUnknown(t *testing.T) {
+	var postHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-levels",
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				atomic.AddInt32(&postHits, 1)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			// GET (getSocLevel): rate-limited, so socMin stays unknown.
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"messages":[{"code":"err.func.wired.overloaded"}]}`))
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	_ = st.Set("vehicle.renault_user", "u")
+	_ = st.Set("vehicle.renault_password", "p")
+	_ = st.Set("vehicle.vin", "TESTVIN")
+	r := testRenault(t, st, srv.URL) // cache cold: socMin unknown, store empty
+
+	err := r.SetSocTarget(80)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rate-limited")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&postHits), "must not POST a fabricated socMin=0")
+	assert.Equal(t, 0, st.GetInt("vehicle.soc_target", 0), "target must not persist on refusal")
+}
+
+// TestGetSocLevelRateLimited verifies a 429 is surfaced as errRenaultRateLimited
+// so callers can distinguish quota exhaustion from other failures.
+func TestGetSocLevelRateLimited(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"messages":[{"code":"err.func.wired.overloaded"}]}`))
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := testRenault(t, testStore(t), srv.URL)
+	_, err := r.getSocLevel("TESTVIN")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errRenaultRateLimited), "429 must map to errRenaultRateLimited")
+}
+
+// TestGetSocLevelTopLevelShape verifies we parse the real KCM response, which is
+// a bare top-level object (NOT wrapped in data.attributes like KCA endpoints).
+func TestGetSocLevelTopLevelShape(t *testing.T) {
+	var singularHits int32
+	mux := http.NewServeMux()
+	// Current gateways serve the plural resource; singular 404s.
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-levels",
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"lastEnergyUpdateTimestamp":"2025-04-18T06:51:09Z","socMin":25,"socTarget":80}`))
+		})
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&singularHits, 1); w.WriteHeader(404) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := testRenault(t, testStore(t), srv.URL)
+	lvl, err := r.getSocLevel("TESTVIN")
+	require.NoError(t, err)
+	assert.Equal(t, 25, lvl.SocMin, "socMin must parse from the bare top-level body")
+	assert.Equal(t, 80, lvl.SocTarget)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&singularHits), "plural endpoint must be used without falling back")
+}
+
+// TestGetSocLevelWrappedFallback verifies the fallback still handles a gateway
+// that returns the data.attributes-wrapped shape.
+func TestGetSocLevelWrappedFallback(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"attributes": map[string]any{"socMin": 30, "socTarget": 90}},
+			})
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := testRenault(t, testStore(t), srv.URL)
+	lvl, err := r.getSocLevel("TESTVIN")
+	require.NoError(t, err)
+	assert.Equal(t, 30, lvl.SocMin)
+	assert.Equal(t, 90, lvl.SocTarget)
+}
+
+// TestSocLevelSkippedWhenKnownAndFresh verifies the redundancy fix: once the
+// limits are known and recently read, a slow-tier poll does NOT re-hit the
+// strict-quota soc-level endpoint.
+func TestSocLevelSkippedWhenKnownAndFresh(t *testing.T) {
+	var socLevelHits, batteryHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/battery-status",
+		batteryStatusHandler(&batteryHits, 50, 0))
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&socLevelHits, 1)
+			_, _ = w.Write([]byte(`{"socMin":25,"socTarget":80}`))
+		})
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/cockpit",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"attributes": map[string]any{"totalMileage": 10.0}},
+			})
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	r := testRenault(t, st, srv.URL)
+	r.markDetailsFetched(time.Now())
+	r.setSocLevelCache(25, 80)                                                     // known
+	_ = st.Set("vehicle.soc_level_read_at", time.Now().UTC().Format(time.RFC3339)) // fresh
+
+	var cache abrpCache
+	_, err := r.pollOnce("u", "p", "TESTVIN", true, "test", &cache)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&socLevelHits), "soc-level must be skipped when known and fresh")
+}
+
+// batteryStatusHandler encodes a minimal battery-status response.
+func batteryStatusHandler(hits *int32, level, plug int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"attributes": map[string]any{
+				"batteryLevel": level,
+				"plugStatus":   plug,
+				"timestamp":    "2026-04-25T10:00:00Z",
+			}},
+		})
+	}
+}
+
+// TestPollOnceTierASkipsSlowTier confirms a Tier-A-only poll fetches battery
+// status but not the slow group (soc-level, cockpit).
+func TestPollOnceTierASkipsSlowTier(t *testing.T) {
+	var batteryHits, socLevelHits, cockpitHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/battery-status",
+		batteryStatusHandler(&batteryHits, 55, 1))
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&socLevelHits, 1) })
+	cockpit := func(w http.ResponseWriter, r *http.Request) { atomic.AddInt32(&cockpitHits, 1) }
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/cockpit", cockpit)
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v1/cars/TESTVIN/cockpit", cockpit)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	r := testRenault(t, st, srv.URL)
+	r.markDetailsFetched(time.Now()) // skip the daily details (Tier C) fetch
+
+	var cache abrpCache
+	plugged, err := r.pollOnce("u", "p", "TESTVIN", false, "test", &cache)
+	require.NoError(t, err)
+	assert.True(t, plugged)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&batteryHits))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&socLevelHits), "Tier A must not fetch soc-level")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&cockpitHits), "Tier A must not fetch cockpit")
+	assert.Equal(t, 55, st.GetInt("scheduler.current_soc", 0))
+	assert.Equal(t, 1, st.GetInt("vehicle.plug_status", 0))
+}
+
+// TestPollOnceTierBFetchesAndCaches confirms a Tier-B poll fetches the slow group
+// and populates the store + in-memory caches.
+func TestPollOnceTierBFetchesAndCaches(t *testing.T) {
+	var batteryHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/battery-status",
+		batteryStatusHandler(&batteryHits, 40, 0))
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"attributes": map[string]any{"socMin": 20, "socTarget": 75}},
+			})
+		})
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/cockpit",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"attributes": map[string]any{"totalMileage": 12345.0}},
+			})
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	r := testRenault(t, st, srv.URL)
+	r.markDetailsFetched(time.Now())
+
+	var cache abrpCache
+	plugged, err := r.pollOnce("u", "p", "TESTVIN", true, "test", &cache)
+	require.NoError(t, err)
+	assert.False(t, plugged)
+	assert.Equal(t, 75, st.GetInt("vehicle.soc_target", 0))
+	assert.Equal(t, 20, st.GetInt("vehicle.soc_min", 0))
+	assert.InDelta(t, 12345.0, cache.odometerKm, 0.1)
+
+	min, known := r.cachedSocMin()
+	assert.True(t, known)
+	assert.Equal(t, 20, min)
+}
+
+// TestSocLevelBackoffAfter429 verifies that a soc-level 429 persists a backoff
+// and suppresses further soc-level calls until it expires — so we stop pinning
+// the exhausted quota (and don't re-hit it on every restart).
+func TestSocLevelBackoffAfter429(t *testing.T) {
+	var socLevelHits, batteryHits int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/battery-status",
+		batteryStatusHandler(&batteryHits, 50, 0))
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-level",
+		func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&socLevelHits, 1)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"messages":[{"code":"err.func.wired.overloaded"}]}`))
+		})
+	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kca/car-adapter/v2/cars/TESTVIN/cockpit",
+		func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"attributes": map[string]any{"totalMileage": 100.0}},
+			})
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	st := testStore(t)
+	r := testRenault(t, st, srv.URL)
+	r.markDetailsFetched(time.Now())
+
+	var cache abrpCache
+	// First Tier-B poll: soc-level 429 → backoff persisted.
+	_, err := r.pollOnce("u", "p", "TESTVIN", true, "test", &cache)
+	require.NoError(t, err) // battery ok; soc-level is best-effort
+	assert.Equal(t, int32(1), atomic.LoadInt32(&socLevelHits))
+	assert.NotEmpty(t, st.GetDefault("vehicle.soc_level_backoff_until", ""), "429 must persist a backoff")
+	assert.True(t, r.socLevelBackedOff())
+
+	// Second Tier-B poll while backed off: soc-level must be skipped.
+	_, err = r.pollOnce("u", "p", "TESTVIN", true, "test", &cache)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&socLevelHits), "soc-level must be skipped during backoff")
+}
+
+// TestSchedulePlugPollCoalesces verifies a burst of socket events collapses to a
+// single queued poll (the buffered-channel debounce), so repeated status
+// notifications can't fan out into multiple Kamereon polls.
+func TestSchedulePlugPollCoalesces(t *testing.T) {
+	r := testRenault(t, testStore(t), "http://unused")
+	for i := 0; i < 5; i++ {
+		r.SchedulePlugPoll()
+	}
+	assert.Equal(t, 1, len(r.plugCh), "bursts should coalesce to a single queued poll")
+	<-r.plugCh
+	assert.Equal(t, 0, len(r.plugCh))
 }

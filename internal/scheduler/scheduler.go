@@ -960,6 +960,11 @@ func isPluggedIn(status string) bool {
 // ignored because the Renault API can lag behind reality by up to one poll
 // interval — without this check, a "0" cached from before the user plugged
 // in would block a legitimate charge until the next Renault poll.
+//
+// vehicle.plug_status / battery_timestamp are refreshed by the poller's 15-min
+// battery tier plus a ~1-min debounced poll on every real plug/unplug socket
+// transition, so a genuine plug-in clears the block within ~1 min and maxAge
+// (2×poll_interval, min 30 min) still bounds a stale unplugged reading.
 func (s *Scheduler) isVehiclePlugBlocked() (blocked bool, skipReason string) {
 	if !s.store.GetBool("vehicle.require_plug_check", false) {
 		return false, ""

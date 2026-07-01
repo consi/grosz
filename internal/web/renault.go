@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/vehicle"
 )
 
@@ -90,10 +89,7 @@ func (s *Server) handleSetSocTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.renault.SetSocTarget(req.Target); err != nil {
-		s.web.Warn(events.ActionRenaultSocTarget,
-			map[string]any{"target": req.Target},
-			map[string]any{"error": err.Error()},
-		)
+		// The outcome is recorded by SetSocTarget under the renault source.
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -104,8 +100,5 @@ func (s *Server) handleSetSocTarget(w http.ResponseWriter, r *http.Request) {
 		s.scheduler.ReloadConfig()
 	}
 
-	s.web.Info(events.ActionRenaultSocTarget,
-		map[string]any{"target": req.Target}, nil,
-	)
 	writeJSON(w, map[string]any{"ok": true})
 }

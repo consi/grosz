@@ -28,6 +28,13 @@ type SoCUpdater func(energyKWh float64)
 // ConnectorStatusHook is called when a connector's status changes.
 type ConnectorStatusHook func(cpID string, connectorID int, status string)
 
+// PlugEventHook is called only on a real connector transition into a socket
+// state worth a fresh vehicle poll — plug (Preparing), unplug (Available), or
+// charge-complete (SuspendedEV). Unlike ConnectorStatusHook it is deduped
+// against persisted connector state, so periodic status re-notifications and
+// websocket reconnects don't fire it.
+type PlugEventHook func(cpID string, connectorID int, from, to string)
+
 // TransactionEndedHook is called right after OnStopTransaction clears a
 // connector's txnID. Lets the scheduler react the moment the charger
 // confirms a stop, without waiting for the post-stop StatusNotification
@@ -36,24 +43,25 @@ type TransactionEndedHook func(cpID string, connectorID int, transactionID int)
 
 // Server wraps the OCPP 1.6 Central System.
 type Server struct {
-	cs        ocpp16.CentralSystem
-	mu        sync.RWMutex
-	points    map[string]*ChargePoint
+	cs     ocpp16.CentralSystem
+	mu     sync.RWMutex
+	points map[string]*ChargePoint
 	// realAddrs maps cpID → resolved client IP captured from X-Forwarded-For
 	// during the WebSocket upgrade. The gorilla connection's RemoteAddr only
 	// sees the reverse-proxy peer, so we stash the real IP here and read it
 	// in the connect handler.
-	realAddrs  map[string]string
-	store     *store.Store
-	events    *events.Bound
-	log       *slog.Logger
-	bootHooks  []BootHook
-	statusHook         StatusHook
-	socUpdater         SoCUpdater
-	connStatusHook     ConnectorStatusHook
-	txnEndedHook       TransactionEndedHook
-	nextTxnID  atomic.Int64
-	lastPurge  time.Time
+	realAddrs      map[string]string
+	store          *store.Store
+	events         *events.Bound
+	log            *slog.Logger
+	bootHooks      []BootHook
+	statusHook     StatusHook
+	socUpdater     SoCUpdater
+	connStatusHook ConnectorStatusHook
+	plugEventHook  PlugEventHook
+	txnEndedHook   TransactionEndedHook
+	nextTxnID      atomic.Int64
+	lastPurge      time.Time
 }
 
 // NewServer creates a new OCPP Central System server.
@@ -203,6 +211,14 @@ func (s *Server) SetConnectorStatusHook(hook ConnectorStatusHook) {
 	s.connStatusHook = hook
 }
 
+// SetPlugEventHook registers a callback fired only on real plug/unplug/
+// charge-complete connector transitions (deduped against persisted state).
+func (s *Server) SetPlugEventHook(hook PlugEventHook) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.plugEventHook = hook
+}
+
 // SetTransactionEndedHook registers a callback fired right after a
 // StopTransaction clears a connector's txnID.
 func (s *Server) SetTransactionEndedHook(hook TransactionEndedHook) {
@@ -226,6 +242,15 @@ func (s *Server) fireConnectorStatusHook(cpID string, connectorID int, status st
 	s.mu.RUnlock()
 	if hook != nil {
 		go hook(cpID, connectorID, status)
+	}
+}
+
+func (s *Server) firePlugEventHook(cpID string, connectorID int, from, to string) {
+	s.mu.RLock()
+	hook := s.plugEventHook
+	s.mu.RUnlock()
+	if hook != nil {
+		go hook(cpID, connectorID, from, to)
 	}
 }
 
