@@ -55,11 +55,11 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
   const [items, setItems] = useState<CostLogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [fromDate, setFromDate] = useState(monthAgoStr());
   const [toDate, setToDate] = useState(todayStr());
   const [report, setReport] = useState<SessionReport | null>(null);
-  const [reportLoading, setReportLoading] = useState(false);
+  const [reportLoading, setReportLoading] = useState(true);
 
   // External cost form
   const [newCostDate, setNewCostDate] = useState(todayStr());
@@ -68,7 +68,6 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
   const [costSaving, setCostSaving] = useState(false);
 
   const fetchCostLog = useCallback(async (p: number) => {
-    setLoading(true);
     try {
       const params = new URLSearchParams({
         limit: String(PAGE_SIZE),
@@ -86,7 +85,6 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
   }, [fromDate, toDate]);
 
   const fetchReport = useCallback(async () => {
-    setReportLoading(true);
     try {
       const params = new URLSearchParams({ from: fromDate, to: toDate });
       const resp = await fetch(`/api/sessions/report?${params}`);
@@ -98,12 +96,13 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
   }, [fromDate, toDate]);
 
   useEffect(() => {
-    fetchCostLog(page);
+    const timer = window.setTimeout(() => void fetchCostLog(page), 0);
+    return () => window.clearTimeout(timer);
   }, [page, fetchCostLog, refreshKey]);
 
   useEffect(() => {
-    setPage(0);
-    fetchReport();
+    const timer = window.setTimeout(() => void fetchReport(), 0);
+    return () => window.clearTimeout(timer);
   }, [fromDate, toDate, fetchReport]);
 
   const addCost = async () => {
@@ -158,11 +157,29 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
         <div className="report-range">
           <label>
             {t('report.from')}
-            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+            <input
+              type="date"
+              value={fromDate}
+              onChange={(e) => {
+                setLoading(true);
+                setReportLoading(true);
+                setPage(0);
+                setFromDate(e.target.value);
+              }}
+            />
           </label>
           <label>
             {t('report.to')}
-            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+            <input
+              type="date"
+              value={toDate}
+              onChange={(e) => {
+                setLoading(true);
+                setReportLoading(true);
+                setPage(0);
+                setToDate(e.target.value);
+              }}
+            />
           </label>
           <button
             className="btn-page"
@@ -305,11 +322,11 @@ export function Sessions({ refreshKey, timezone }: { refreshKey?: number; timezo
 
             {totalPages > 1 && (
               <div className="log-pagination">
-                <button className="btn-page" disabled={page === 0} onClick={() => setPage(page - 1)}>
+                <button className="btn-page" disabled={page === 0} onClick={() => { setLoading(true); setPage(page - 1); }}>
                   {t('common.previous')}
                 </button>
                 <span className="muted">{t('common.page', { page: page + 1, total: totalPages })}</span>
-                <button className="btn-page" disabled={page >= totalPages - 1} onClick={() => setPage(page + 1)}>
+                <button className="btn-page" disabled={page >= totalPages - 1} onClick={() => { setLoading(true); setPage(page + 1); }}>
                   {t('common.next')}
                 </button>
               </div>

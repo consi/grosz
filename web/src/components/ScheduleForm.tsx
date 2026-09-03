@@ -124,6 +124,11 @@ function matchingOverrideFor(period: SchedulePeriod, overrides: ScheduleOverride
   return overrides.find((o) => o.kind === 'force' && o.start === period.start && o.end === period.end);
 }
 
+function isActive(period: { start: string; end: string }): boolean {
+  const now = Date.now();
+  return new Date(period.start).getTime() <= now && now < new Date(period.end).getTime();
+}
+
 export function ScheduleForm({
   schedule, overrides, skipReason, skipReasonKey, skipReasonParams,
   onApply, onCancel, onSlotCancel, onSlotRestore,
@@ -133,16 +138,12 @@ export function ScheduleForm({
   const activeSlots = schedule?.slots?.filter((s) => !s.cancelled) || [];
   const [editing, setEditing] = useState<{ slotDate?: string; period?: SchedulePeriod } | null>(null);
   const [adding, setAdding] = useState<string | null>(null); // slot date
+  const [defaultAddPeriod, setDefaultAddPeriod] = useState<{ start: string; end: string } | null>(null);
 
   const blockOverrides = overrides.filter((o) => o.kind === 'block');
 
   const blocksForSlot = (slotStart: string, slotEnd: string): ScheduleOverride[] => {
     return blockOverrides.filter((o) => o.start < slotEnd && o.end > slotStart);
-  };
-
-  const isActive = (period: { start: string; end: string }): boolean => {
-    const now = Date.now();
-    return new Date(period.start).getTime() <= now && now < new Date(period.end).getTime();
   };
 
   const handlePinOrUnpin = async (period: SchedulePeriod) => {
@@ -189,6 +190,16 @@ export function ScheduleForm({
       return;
     }
     setAdding(null);
+    setDefaultAddPeriod(null);
+  };
+
+  const startDefaultAdd = () => {
+    const now = Date.now();
+    setDefaultAddPeriod({
+      start: new Date(now + 60 * 60 * 1000).toISOString(),
+      end: new Date(now + 2 * 60 * 60 * 1000).toISOString(),
+    });
+    setAdding('__none__');
   };
 
   const renderSlot = (slot: typeof activeSlots[number]) => {
@@ -327,19 +338,19 @@ export function ScheduleForm({
             </div>
           )}
           {/* Always allow adding an override even when schedule is skipped/empty */}
-          {adding === '__none__' ? (
+          {adding === '__none__' && defaultAddPeriod ? (
             <PeriodEditor
               initial={{
-                start: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-                end: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+                start: defaultAddPeriod.start,
+                end: defaultAddPeriod.end,
                 powerW: defaultPowerW,
               }}
               defaultPowerW={defaultPowerW}
               onSave={handleAddSave}
-              onCancel={() => setAdding(null)}
+              onCancel={() => { setAdding(null); setDefaultAddPeriod(null); }}
             />
           ) : (
-            <button className="btn-sm" onClick={() => setAdding('__none__')} style={{ marginTop: '0.75rem' }}>
+            <button className="btn-sm" onClick={startDefaultAdd} style={{ marginTop: '0.75rem' }}>
               {t('schedule.addCustom')}
             </button>
           )}

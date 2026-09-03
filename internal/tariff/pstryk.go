@@ -72,6 +72,7 @@ type Pstryk struct {
 	liveWarnAt    time.Time
 
 	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 // NewPstryk creates a Pstryk provider that starts refreshing rates in the background.
@@ -100,7 +101,7 @@ func NewPstrykWithURL(st *store.Store, log *slog.Logger, baseURL string) *Pstryk
 		p.log.Info("loaded cached rates", "count", len(cached))
 	}
 
-	go p.refreshLoop(ctx)
+	p.wg.Go(func() { p.refreshLoop(ctx) })
 	return p
 }
 
@@ -119,6 +120,7 @@ func (p *Pstryk) Rates() ([]Rate, error) {
 
 func (p *Pstryk) Stop() {
 	p.cancel()
+	p.wg.Wait()
 }
 
 func (p *Pstryk) refreshLoop(ctx context.Context) {
@@ -126,8 +128,8 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 	// Consumption backfill can be slow on cold-start (up to 48h of frames +
 	// idle rebuilds), so run it off the goroutine that owns the ticker.
 	p.fetchAndStore(ctx)
-	go p.fetchConsumptionAndStore(ctx)
-	go p.liveLoop(ctx)
+	p.wg.Go(func() { p.fetchConsumptionAndStore(ctx) })
+	p.wg.Go(func() { p.liveLoop(ctx) })
 
 	// Use a short interval initially — once rates are loaded, switch to hourly
 	ticker := time.NewTicker(2 * time.Minute)

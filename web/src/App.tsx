@@ -74,9 +74,6 @@ function App() {
   }, []);
 
   // Auth-aware fetch: redirects to login on 401
-  const authedRef = useRef(authed);
-  authedRef.current = authed;
-
   const apiFetch = useCallback((url: string, options?: RequestInit) => {
     return fetch(url, options).then((r) => {
       if (r.status === 401) {

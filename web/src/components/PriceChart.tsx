@@ -26,6 +26,75 @@ function formatDate(d: Date, tz: string, locale: string): string {
 
 const DRAG_THRESHOLD_PX = 6;
 const DOUBLE_TAP_MS = 300;
+const LOWER_PERCENTILE_KEY = 'grosz.priceChart.lowerPercentile';
+const UPPER_PERCENTILE_KEY = 'grosz.priceChart.upperPercentile';
+const DEFAULT_LOWER_PERCENTILE = 2.5;
+const DEFAULT_UPPER_PERCENTILE = 75;
+
+type RGB = readonly [number, number, number];
+
+const PRICE_GREEN: RGB = [48, 209, 88];
+const PRICE_YELLOW: RGB = [255, 214, 10];
+const PRICE_RED: RGB = [255, 69, 58];
+
+function mixColor(from: RGB, to: RGB, amount: number): string {
+  const channels = from.map((channel, i) =>
+    Math.round(channel + (to[i] - channel) * amount),
+  );
+  return `rgb(${channels.join(', ')})`;
+}
+
+function percentile(sortedValues: number[], position: number): number {
+  const index = (sortedValues.length - 1) * position;
+  const lowerIndex = Math.floor(index);
+  const upperIndex = Math.ceil(index);
+  const amount = index - lowerIndex;
+  return sortedValues[lowerIndex] +
+    (sortedValues[upperIndex] - sortedValues[lowerIndex]) * amount;
+}
+
+function priceColor(price: number, low: number, middle: number, high: number): string {
+  if (price === middle) {
+    return `rgb(${PRICE_YELLOW.join(', ')})`;
+  }
+
+  if (price < middle) {
+    const range = middle - low;
+    if (!Number.isFinite(range) || range <= 0) return mixColor(PRICE_GREEN, PRICE_YELLOW, 0);
+    const position = Math.max(0, Math.min(1, (price - low) / range));
+    return mixColor(PRICE_GREEN, PRICE_YELLOW, position);
+  }
+
+  const range = high - middle;
+  if (!Number.isFinite(range) || range <= 0) return mixColor(PRICE_YELLOW, PRICE_RED, 1);
+  const position = Math.max(0, Math.min(1, (price - middle) / range));
+  return mixColor(PRICE_YELLOW, PRICE_RED, position);
+}
+
+function storedPercentile(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const value = Number.parseFloat(localStorage.getItem(key) ?? '');
+    return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function savePercentile(key: string, value: number): void {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // Keep live controls working when browser storage is unavailable.
+  }
+}
+
+function storedPercentiles(): { lower: number; upper: number } {
+  const lower = storedPercentile(LOWER_PERCENTILE_KEY, DEFAULT_LOWER_PERCENTILE, 0, 99.5);
+  const upper = storedPercentile(UPPER_PERCENTILE_KEY, DEFAULT_UPPER_PERCENTILE, 0.5, 100);
+  return lower < upper
+    ? { lower, upper }
+    : { lower: DEFAULT_LOWER_PERCENTILE, upper: DEFAULT_UPPER_PERCENTILE };
+}
 
 export function PriceChart({ rates, schedule, consumption, markers, timezone }: Props) {
   const { t, locale } = useTranslation();
@@ -38,6 +107,8 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
   const pointerDownXRef = useRef<number | null>(null);
   const lastTapRef = useRef<number>(0);
   const draggingRef = useRef<boolean>(false);
+  const [{ lower: lowerPercentile, upper: upperPercentile }, setPercentiles] =
+    useState(storedPercentiles);
 
   const setChartRef = useCallback((node: HTMLDivElement | null) => {
     chartRef.current = node;
@@ -77,6 +148,13 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
   const maxPrice = Math.max(...prices);
   const minPrice = Math.min(...prices);
   const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+  const sortedPrices = rates.map((r) => r.price).sort((a, b) => a - b);
+  const colorLowPrice = percentile(sortedPrices, lowerPercentile / 100);
+  const colorMiddlePrice = percentile(
+    sortedPrices,
+    (lowerPercentile + upperPercentile) / 200,
+  );
+  const colorHighPrice = percentile(sortedPrices, upperPercentile / 100);
   const now = new Date();
 
   const hasNegative = minPrice < 0;
@@ -339,18 +417,22 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
               const height = (Math.abs(r.price) / scaleRange) * 100;
               const isNeg = r.price < 0;
               const isCurrent = now >= start && now < new Date(r.end);
-              const priceLevel =
-                r.price <= avgPrice * 0.7 ? 'cheap' :
-                r.price >= avgPrice * 1.3 ? 'expensive' : 'normal';
 
-              const barStyle: React.CSSProperties = isNeg
-                ? { top: `${zeroPct}%`, height: `${Math.max(height, 0.5)}%` }
-                : { bottom: `${100 - zeroPct}%`, height: `${Math.max(height, 0.5)}%` };
+              const barStyle: React.CSSProperties = {
+                height: `${Math.max(height, 0.5)}%`,
+                backgroundColor: priceColor(
+                  r.price,
+                  colorLowPrice,
+                  colorMiddlePrice,
+                  colorHighPrice,
+                ),
+                ...(isNeg ? { top: `${zeroPct}%` } : { bottom: `${100 - zeroPct}%` }),
+              };
 
               return (
                 <div key={i} className="bar-slot">
                   <div
-                    className={`bar ${priceLevel} ${isCurrent ? 'current' : ''} ${isNeg ? 'negative' : ''} ${hover?.idx === i ? 'hovered' : ''}`}
+                    className={`bar ${isCurrent ? 'current' : ''} ${isNeg ? 'negative' : ''} ${hover?.idx === i ? 'hovered' : ''}`}
                     style={barStyle}
                   />
                 </div>
@@ -403,7 +485,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
             <div
               className="chart-tooltip"
               style={{
-                left: Math.min(hover.x + 12, chartRef.current ? chartRef.current.offsetWidth - 180 : 250),
+                left: Math.min(hover.x + 12, Math.max(chartWidth - 180, 0)),
                 top: Math.max(hover.y - 80, 0),
               }}
             >
@@ -441,6 +523,70 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
             <span className="muted">{energyUnit}</span>
           </div>
         )}
+
+        <div className="percentile-control">
+          <div className="percentile-rail">
+            <div
+              className="percentile-selection"
+              style={{
+                '--selection-start': `${lowerPercentile}%`,
+                '--selection-size': `${upperPercentile - lowerPercentile}%`,
+              } as React.CSSProperties}
+            />
+          </div>
+          <input
+            className="percentile-range percentile-range-lower"
+            type="range"
+            min="0"
+            max="100"
+            step="0.5"
+            value={lowerPercentile}
+            aria-label="Green bound percentile"
+            aria-valuemax={upperPercentile - 0.5}
+            aria-valuetext={`${lowerPercentile}%`}
+            onChange={(e) => {
+              const value = Math.min(upperPercentile - 0.5, Number(e.target.value));
+              setPercentiles({ lower: value, upper: upperPercentile });
+              savePercentile(LOWER_PERCENTILE_KEY, value);
+            }}
+          />
+          <input
+            className="percentile-range percentile-range-upper"
+            type="range"
+            min="0"
+            max="100"
+            step="0.5"
+            value={upperPercentile}
+            aria-label="Red bound percentile"
+            aria-valuemin={lowerPercentile + 0.5}
+            aria-valuetext={`${upperPercentile}%`}
+            onChange={(e) => {
+              const value = Math.max(lowerPercentile + 0.5, Number(e.target.value));
+              setPercentiles({ lower: lowerPercentile, upper: value });
+              savePercentile(UPPER_PERCENTILE_KEY, value);
+            }}
+          />
+          <span
+            className="percentile-value percentile-value-lower"
+            style={{
+              '--vertical-position': `${38 + lowerPercentile * 2.84}px`,
+              '--horizontal-position': `${lowerPercentile}%`,
+              '--horizontal-offset': `${38 - lowerPercentile * 0.76}px`,
+            } as React.CSSProperties}
+          >
+            {lowerPercentile}%
+          </span>
+          <span
+            className="percentile-value percentile-value-upper"
+            style={{
+              '--vertical-position': `${38 + upperPercentile * 2.84}px`,
+              '--horizontal-position': `${upperPercentile}%`,
+              '--horizontal-offset': `${38 - upperPercentile * 0.76}px`,
+            } as React.CSSProperties}
+          >
+            {upperPercentile}%
+          </span>
+        </div>
       </div>
 
       {/* X-axis labels */}
@@ -448,7 +594,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
         const minLabelWidth = 22;
         const labelStep = chartWidth > 0 ? Math.max(1, Math.ceil((barCount * minLabelWidth) / chartWidth)) : 1;
         return (
-          <div className="x-axis" style={{ marginLeft: '38px', marginRight: hasConsumption ? '38px' : '0' }}>
+          <div className={`x-axis ${hasConsumption ? 'with-consumption' : ''}`}>
             {xLabels.map((l) => {
               const show = l.date || l.idx % labelStep === 0;
               return (

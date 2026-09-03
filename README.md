@@ -44,7 +44,7 @@ Splitting the UI and the OCPP endpoint onto separate hostnames keeps the protoco
 
 ## Quick start (local development)
 
-Requirements: Go 1.22+, Node 20+, npm.
+Requirements: Go 1.27+, Node 26.8.1+, npm.
 
 ```bash
 make build      # builds the React UI and the Go binary

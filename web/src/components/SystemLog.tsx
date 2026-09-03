@@ -20,14 +20,13 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
   const [page, setPage] = useState(0);
   const [filter, setFilter] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   // Sources are derived from the backend (DISTINCT source from system_events).
   // Cached in state so the dropdown doesn't shrink while a filter is applied
   // (filtered queries return only that source's events) — only grow it.
   const [sources, setSources] = useState<string[]>([]);
 
   const fetchPage = useCallback(async (p: number, source: string) => {
-    setLoading(true);
     try {
       const params = new URLSearchParams({ n: String(PAGE_SIZE), offset: String(p * PAGE_SIZE) });
       if (source) params.set('source', source);
@@ -52,7 +51,8 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
   }, []);
 
   useEffect(() => {
-    fetchPage(page, filter);
+    const timer = window.setTimeout(() => void fetchPage(page, filter), 0);
+    return () => window.clearTimeout(timer);
   }, [page, filter, fetchPage, refreshKey]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -66,7 +66,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
           <select
             className="log-filter"
             value={filter}
-            onChange={(e) => { setFilter(e.target.value); setPage(0); }}
+            onChange={(e) => { setLoading(true); setFilter(e.target.value); setPage(0); }}
           >
             <option value="">{t('sysLog.allSources')}</option>
             {sources.map((s) => (
@@ -122,7 +122,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
               <button
                 className="btn-page"
                 disabled={page === 0}
-                onClick={() => setPage(page - 1)}
+                onClick={() => { setLoading(true); setPage(page - 1); }}
               >
                 {t('common.previous')}
               </button>
@@ -132,7 +132,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
               <button
                 className="btn-page"
                 disabled={page >= totalPages - 1}
-                onClick={() => setPage(page + 1)}
+                onClick={() => { setLoading(true); setPage(page + 1); }}
               >
                 {t('common.next')}
               </button>

@@ -20,10 +20,9 @@ export function OcppLog({ refreshKey, timezone }: { refreshKey?: number; timezon
   const [filter, setFilter] = useState('');
   const [actions, setActions] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const fetchPage = useCallback(async (p: number, action: string) => {
-    setLoading(true);
     try {
       const params = new URLSearchParams({ n: String(PAGE_SIZE), offset: String(p * PAGE_SIZE) });
       if (action) params.set('action', action);
@@ -49,7 +48,8 @@ export function OcppLog({ refreshKey, timezone }: { refreshKey?: number; timezon
   }, []);
 
   useEffect(() => {
-    fetchPage(page, filter);
+    const timer = window.setTimeout(() => void fetchPage(page, filter), 0);
+    return () => window.clearTimeout(timer);
   }, [page, filter, fetchPage, refreshKey]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -63,7 +63,7 @@ export function OcppLog({ refreshKey, timezone }: { refreshKey?: number; timezon
           <select
             className="log-filter"
             value={filter}
-            onChange={(e) => { setFilter(e.target.value); setPage(0); }}
+            onChange={(e) => { setLoading(true); setFilter(e.target.value); setPage(0); }}
           >
             <option value="">{t('ocppLog.allActions')}</option>
             {actions.map((a) => (
@@ -110,7 +110,7 @@ export function OcppLog({ refreshKey, timezone }: { refreshKey?: number; timezon
               <button
                 className="btn-page"
                 disabled={page === 0}
-                onClick={() => setPage(page - 1)}
+                onClick={() => { setLoading(true); setPage(page - 1); }}
               >
                 {t('common.previous')}
               </button>
@@ -120,7 +120,7 @@ export function OcppLog({ refreshKey, timezone }: { refreshKey?: number; timezon
               <button
                 className="btn-page"
                 disabled={page >= totalPages - 1}
-                onClick={() => setPage(page + 1)}
+                onClick={() => { setLoading(true); setPage(page + 1); }}
               >
                 {t('common.next')}
               </button>
