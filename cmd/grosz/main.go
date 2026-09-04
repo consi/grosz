@@ -43,6 +43,7 @@ var defaultSettings = map[string]string{
 	"ocpp.auth_key":                   "",
 	"zappi.charge_box_id":             "",
 	"zappi.commercial_mode":           "true",
+	"zappi.maintenance_mode":          "false",
 	"zappi.id_tag":                    "grosz",
 	"zappi.meter_interval":            "10",
 	"zappi.charger_name":              "",

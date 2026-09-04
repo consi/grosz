@@ -110,6 +110,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("POST /api/charger/{id}/reset", s.requireAuth(s.handleChargerReset))
 	mux.HandleFunc("POST /api/charger/{id}/clear-cache", s.requireAuth(s.handleChargerClearCache))
 	mux.HandleFunc("POST /api/charger/{id}/update-firmware", s.requireAuth(s.handleChargerUpdateFirmware))
+	mux.HandleFunc("POST /api/charger/{id}/maintenance-mode", s.requireAuth(s.handleChargerMaintenanceMode))
 	mux.HandleFunc("GET /api/costlog", s.requireAuth(s.handleCostLog))
 	mux.HandleFunc("GET /api/sessions", s.requireAuth(s.handleSessions))
 	mux.HandleFunc("GET /api/sessions/report", s.requireAuth(s.handleSessionReport))

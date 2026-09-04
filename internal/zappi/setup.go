@@ -50,6 +50,11 @@ func Setup(srv *ocpp.Server, cpID string, st *store.Store, log *slog.Logger) err
 	if st.GetBool("zappi.commercial_mode", true) {
 		setConfig(KeyCommercialMode, "True", "enable commercial mode")
 	}
+	if st.GetBool("zappi.maintenance_mode", false) {
+		setConfig(KeyMaintenanceMode, "True", "enable maintenance mode")
+	} else {
+		setConfig(KeyMaintenanceMode, "False", "disable maintenance mode")
+	}
 
 	// 3-5. Charging configuration
 	setConfig(KeyFreeCharging, "False", "require OCPP authorization")

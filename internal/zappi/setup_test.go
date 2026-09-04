@@ -31,8 +31,9 @@ func TestZappiSetupSequence(t *testing.T) {
 
 	// Seed settings
 	require.NoError(t, st.SetMany(map[string]string{
-		"zappi.commercial_mode": "true",
-		"zappi.meter_interval":  "10",
+		"zappi.commercial_mode":  "true",
+		"zappi.maintenance_mode": "true",
+		"zappi.meter_interval":   "10",
 	}))
 
 	srv := ocppserver.NewServer(st, log)
@@ -58,11 +59,14 @@ func TestZappiSetupSequence(t *testing.T) {
 	// Wait for setup to complete (runs async in goroutine)
 	time.Sleep(2 * time.Second)
 
-	// Verify config keys were set on the test charge point
-	tcp.SetConfig("", "") // just to sync the mutex
-	// The test CP auto-accepts all ChangeConfiguration, so check its store
-	// CommercialMode should have been set to True
-	// (The test charge point stores all config changes)
+	// Verify mode settings were pushed using the Zappi boolean format.
+	config, err := srv.GetConfiguration("ZAPPI001", []string{
+		zappi.KeyCommercialMode,
+		zappi.KeyMaintenanceMode,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "True", config[zappi.KeyCommercialMode])
+	assert.Equal(t, "True", config[zappi.KeyMaintenanceMode])
 }
 
 func TestNonZappiSkipsSetup(t *testing.T) {

@@ -147,3 +147,48 @@ func TestAPI_ChargerUpdateFirmware_OK(t *testing.T) {
 	assert.Equal(t, time.UTC, got.RetrieveDate.Location())
 	assert.Equal(t, http.StatusOK, <-done)
 }
+
+func TestAPI_ChargerMaintenanceMode_TogglesAndPersists(t *testing.T) {
+	web, _, srv := newAPITestServer(t)
+
+	for _, tc := range []struct {
+		name        string
+		enabled     bool
+		ocppValue   string
+		storedValue string
+	}{
+		{name: "enable", enabled: true, ocppValue: "True", storedValue: "true"},
+		{name: "disable", enabled: false, ocppValue: "False", storedValue: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan int, 1)
+			go func() {
+				body := fmt.Sprintf(`{"enabled":%t}`, tc.enabled)
+				req := httptest.NewRequest(http.MethodPost, "/api/charger/CP_API/maintenance-mode", bytes.NewBufferString(body))
+				req.SetPathValue("id", "CP_API")
+				w := httptest.NewRecorder()
+				web.handleChargerMaintenanceMode(w, req)
+				done <- w.Code
+			}()
+
+			assert.Equal(t, http.StatusOK, <-done)
+			config, err := srv.GetConfiguration("CP_API", []string{"MaintenanceMode"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.ocppValue, config["MaintenanceMode"])
+			stored, err := web.store.Get("zappi.maintenance_mode")
+			require.NoError(t, err)
+			assert.Equal(t, tc.storedValue, stored)
+		})
+	}
+}
+
+func TestAPI_ChargerMaintenanceMode_InvalidJSON(t *testing.T) {
+	web, _, _ := newAPITestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/charger/CP_API/maintenance-mode", bytes.NewBufferString("not json"))
+	req.SetPathValue("id", "CP_API")
+	w := httptest.NewRecorder()
+	web.handleChargerMaintenanceMode(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}

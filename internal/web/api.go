@@ -16,6 +16,7 @@ import (
 	"github.com/consi/grosz/internal/scheduler"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
+	"github.com/consi/grosz/internal/zappi"
 )
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +429,34 @@ func (s *Server) handleChargerUpdateFirmware(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleChargerMaintenanceMode(w http.ResponseWriter, r *http.Request) {
+	cpID := r.PathValue("id")
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	ocppValue := "False"
+	storedValue := "false"
+	if req.Enabled {
+		ocppValue = "True"
+		storedValue = "true"
+	}
+	if err := zappi.PushConfig(s.ocpp, cpID, zappi.KeyMaintenanceMode, ocppValue, s.log); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.store.Set("zappi.maintenance_mode", storedValue); err != nil {
+		s.internalError(w, "failed to save maintenance mode", err)
+		return
+	}
+
+	writeJSON(w, map[string]any{"ok": true, "enabled": req.Enabled})
 }
 
 func (s *Server) handleMeterHourly(w http.ResponseWriter, r *http.Request) {

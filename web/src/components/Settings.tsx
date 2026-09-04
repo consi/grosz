@@ -216,7 +216,13 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
           )}
         </fieldset>
         {g.titleKey === 'settings.charger' && (
-          <MaintenanceSection cpID={getValue('zappi.charge_box_id')} />
+          <MaintenanceSection
+            cpID={getValue('zappi.charge_box_id')}
+            maintenanceMode={getValue('zappi.maintenance_mode') === 'true'}
+            onMaintenanceModeChange={(enabled) => {
+              setSettings((s) => ({ ...s, 'zappi.maintenance_mode': enabled ? 'true' : 'false' }));
+            }}
+          />
         )}
         </div>
       ))}
@@ -230,7 +236,11 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
   );
 }
 
-function MaintenanceSection({ cpID }: { cpID: string }) {
+function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: {
+  cpID: string;
+  maintenanceMode: boolean;
+  onMaintenanceModeChange: (enabled: boolean) => void;
+}) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
@@ -239,8 +249,8 @@ function MaintenanceSection({ cpID }: { cpID: string }) {
 
   const disabled = !cpID;
 
-  const post = async (path: string, body?: unknown) => {
-    if (!cpID || busy) return;
+  const post = async (path: string, body?: unknown): Promise<boolean> => {
+    if (!cpID || busy) return false;
     setBusy(path);
     setMsg(null);
     try {
@@ -251,12 +261,15 @@ function MaintenanceSection({ cpID }: { cpID: string }) {
       });
       if (resp.ok) {
         setMsg({ kind: 'ok', text: t('settings.maintenanceSent') });
+        return true;
       } else {
         const text = await resp.text();
         setMsg({ kind: 'err', text: text || t('settings.maintenanceFailed') });
+        return false;
       }
     } catch (e) {
       setMsg({ kind: 'err', text: (e as Error).message });
+      return false;
     } finally {
       setBusy(null);
     }
@@ -290,10 +303,31 @@ function MaintenanceSection({ cpID }: { cpID: string }) {
     }
   };
 
+  const toggleMaintenanceMode = async () => {
+    const enabled = !maintenanceMode;
+    if (await post('/maintenance-mode', { enabled })) {
+      onMaintenanceModeChange(enabled);
+    }
+  };
+
   return (
     <fieldset>
       <legend>{t('settings.maintenance')}</legend>
       {disabled && <div className="msg">{t('settings.maintenanceNoCharger')}</div>}
+      <div className="setting-row">
+        <span>{t('settings.maintenanceMode')}</span>
+        <button
+          className="btn primary btn-sm"
+          disabled={disabled || busy !== null}
+          onClick={toggleMaintenanceMode}
+        >
+          {busy === '/maintenance-mode'
+            ? t('settings.maintenanceSending')
+            : maintenanceMode
+              ? t('settings.disableMaintenanceMode')
+              : t('settings.enableMaintenanceMode')}
+        </button>
+      </div>
       <div className="setting-row">
         <span>{t('settings.updateFirmware')}</span>
         <button
