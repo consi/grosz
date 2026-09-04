@@ -317,7 +317,7 @@ function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: 
       <div className="setting-row">
         <span>{t('settings.maintenanceMode')}</span>
         <button
-          className="btn primary btn-sm"
+          className={`btn btn-sm ${maintenanceMode ? 'danger' : 'primary'}`}
           disabled={disabled || busy !== null}
           onClick={toggleMaintenanceMode}
         >
