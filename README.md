@@ -255,6 +255,12 @@ Visit `https://grosz.example.com` and log in with the default `admin` / `admin`.
 
 That's it. grosz pulls the next price window and schedules the cheapest hours automatically.
 
+Drag across the price chart to zoom into an hour or a range of hours, then use the calendar/charging icon at its top right to schedule the visible period. Confirm the start and end in the configured display timezone. Custom windows always use the configured maximum charging power.
+
+In the schedule panel, edit or delete automatic periods, manage pinned windows, and restore blocked periods. Deleting a period blocks that time; unpinning a custom window returns it to automatic scheduling. Scheduling an overlapping range replaces earlier instructions inside the selection and preserves the portions outside it. **Cancel everything** clears all windows, blocks, and previous cancellations, then pauses automatic scheduling. You can still add manual windows; choose **Resume automatic scheduling** to enable optimization again. Edits save atomically and scheduler updates are debounced for five seconds. During an open charging transaction, the running schedule stays frozen and window changes wait until the transaction ends. Schedule cancellation is disabled during that session because stopping may require physically reconnecting the car.
+
+For dependency maintenance, `python3 scripts/update-dependencies.py` selects stable versions at least five days old, retaining the supported TypeScript/Babel versions. Run the printed `npm update --before=...` command in `web`, then `go mod tidy`, `make test`, and `cd web && npm test && npm run lint && npm run build`.
+
 ## Architecture
 
 - **OCPP 1.6J** central system on `:8887`, built on [`lorenzodonini/ocpp-go`](https://github.com/lorenzodonini/ocpp-go). The Zappi connects via the MyEnergi cloud OCPP proxy.

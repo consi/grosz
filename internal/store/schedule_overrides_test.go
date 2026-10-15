@@ -105,7 +105,7 @@ func TestDeleteOverride(t *testing.T) {
 	now := time.Now().UTC()
 
 	id, err := s.InsertOverride(ScheduleOverride{
-		Kind: OverrideKindBlock,
+		Kind:  OverrideKindBlock,
 		Start: now.Add(time.Hour), End: now.Add(2 * time.Hour),
 	})
 	require.NoError(t, err)
@@ -125,11 +125,11 @@ func TestLoadOverridesFiltersByEnd(t *testing.T) {
 	now := time.Now().UTC()
 
 	_, _ = s.InsertOverride(ScheduleOverride{
-		Kind: OverrideKindBlock,
+		Kind:  OverrideKindBlock,
 		Start: now.Add(-2 * time.Hour), End: now.Add(-1 * time.Hour),
 	})
 	_, _ = s.InsertOverride(ScheduleOverride{
-		Kind: OverrideKindBlock,
+		Kind:  OverrideKindBlock,
 		Start: now, End: now.Add(time.Hour),
 	})
 
@@ -143,7 +143,7 @@ func TestPurgeOldOverrides(t *testing.T) {
 	now := time.Now().UTC()
 
 	_, _ = s.InsertOverride(ScheduleOverride{
-		Kind: OverrideKindBlock,
+		Kind:  OverrideKindBlock,
 		Start: now.Add(-3 * time.Hour), End: now.Add(-2 * time.Hour),
 	})
 	_, _ = s.InsertOverride(ScheduleOverride{
@@ -157,4 +157,124 @@ func TestPurgeOldOverrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, loaded, 1)
 	assert.Equal(t, OverrideKindForce, loaded[0].Kind)
+}
+
+func TestSaveOverrideAtomicUpdate(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	first := ScheduleOverride{Kind: OverrideKindForce, Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), PowerW: 11000}
+	id, err := s.InsertOverride(first)
+	require.NoError(t, err)
+	first.ID = id
+	_, err = s.InsertOverride(ScheduleOverride{Kind: OverrideKindBlock, Start: now.Add(3 * time.Hour), End: now.Add(4 * time.Hour)})
+	require.NoError(t, err)
+	moved := first
+	moved.End = now.Add(210 * time.Minute)
+	_, err = s.SaveOverride(moved, nil)
+	require.ErrorIs(t, err, ErrOverlap)
+	loaded, err := s.LoadOverrides(now)
+	require.NoError(t, err)
+	require.Len(t, loaded, 2)
+	assert.Equal(t, first.Start, loaded[0].Start)
+	assert.Equal(t, first.End, loaded[0].End, "failed edit must leave old window intact")
+	moved.End = now.Add(150 * time.Minute)
+	updatedID, err := s.SaveOverride(moved, nil)
+	require.NoError(t, err)
+	assert.Equal(t, id, updatedID)
+	loaded, err = s.LoadOverrides(now)
+	require.NoError(t, err)
+	assert.Equal(t, moved.End, loaded[0].End)
+	assert.Equal(t, id, loaded[0].ID)
+}
+
+func TestSaveOverrideReplacesAutomaticPeriod(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		start, end time.Duration
+		blocks     int
+	}{
+		{"shrink", 90 * time.Minute, 150 * time.Minute, 2},
+		{"move", 4 * time.Hour, 5 * time.Hour, 1},
+		{"extend", 30 * time.Minute, 210 * time.Minute, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			original := ScheduleOverride{Start: now.Add(time.Hour), End: now.Add(3 * time.Hour)}
+			_, err := s.SaveOverride(ScheduleOverride{Kind: OverrideKindForce, Start: now.Add(tc.start), End: now.Add(tc.end), PowerW: 11000}, &original)
+			require.NoError(t, err)
+			loaded, err := s.LoadOverrides(now)
+			require.NoError(t, err)
+			require.Len(t, loaded, tc.blocks+1)
+			var blocked time.Duration
+			for _, o := range loaded {
+				if o.Kind == OverrideKindBlock {
+					blocked += o.End.Sub(o.Start)
+				}
+			}
+			overlap := minTime(original.End, now.Add(tc.end)).Sub(maxTime(original.Start, now.Add(tc.start)))
+			if overlap < 0 {
+				overlap = 0
+			}
+			assert.Equal(t, original.End.Sub(original.Start)-overlap, blocked)
+		})
+	}
+}
+
+func TestSaveOverrideRollsBackOriginalBlocksOnConflict(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err := s.InsertOverride(ScheduleOverride{Kind: OverrideKindBlock, Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour)})
+	require.NoError(t, err)
+	_, err = s.SaveOverride(ScheduleOverride{Kind: OverrideKindForce, Start: now.Add(4 * time.Hour), End: now.Add(5 * time.Hour), PowerW: 11000}, &ScheduleOverride{Start: now.Add(time.Hour), End: now.Add(3 * time.Hour)})
+	require.ErrorIs(t, err, ErrOverlap)
+	loaded, err := s.LoadOverrides(now)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+}
+
+func TestApplyOverrideReplacesCoveredRange(t *testing.T) {
+	for _, kind := range []string{OverrideKindBlock, OverrideKindForce} {
+		t.Run(kind, func(t *testing.T) {
+			s := testStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			_, err := s.InsertOverride(ScheduleOverride{Kind: kind, Start: now, End: now.Add(3 * time.Hour), PowerW: 11000})
+			require.NoError(t, err)
+			id, err := s.ApplyOverride(ScheduleOverride{Kind: OverrideKindForce, Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), PowerW: 22000}, nil)
+			require.NoError(t, err)
+			windows, err := s.LoadOverrides(now.Add(-time.Hour))
+			require.NoError(t, err)
+			require.Len(t, windows, 3)
+			assert.Equal(t, now, windows[0].Start)
+			assert.Equal(t, now.Add(time.Hour), windows[0].End)
+			assert.Equal(t, id, windows[1].ID)
+			assert.Equal(t, OverrideKindForce, windows[1].Kind)
+			assert.Equal(t, 22000.0, windows[1].PowerW)
+			assert.Equal(t, now.Add(2*time.Hour), windows[2].Start)
+			assert.Equal(t, now.Add(3*time.Hour), windows[2].End)
+			_, err = s.ApplyOverride(ScheduleOverride{ID: 999, Kind: OverrideKindForce, Start: now, End: now.Add(3 * time.Hour), PowerW: 22000}, nil)
+			require.ErrorIs(t, err, sql.ErrNoRows)
+			unchanged, err := s.LoadOverrides(now.Add(-time.Hour))
+			require.NoError(t, err)
+			assert.Equal(t, windows, unchanged)
+		})
+	}
+}
+
+func TestResetScheduleClearsAllCancellationState(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC()
+	require.NoError(t, s.Set("scheduler.persisted_schedule", `{"slots":[{"cancelled":true}]}`))
+	require.NoError(t, s.Set("charger.max_power", "22000"))
+	_, err := s.InsertOverride(ScheduleOverride{Kind: OverrideKindBlock, Start: now.Add(-2 * time.Hour), End: now.Add(-time.Hour)})
+	require.NoError(t, err)
+	_, err = s.InsertOverride(ScheduleOverride{Kind: OverrideKindForce, Start: now, End: now.Add(time.Hour), PowerW: 11000})
+	require.NoError(t, err)
+	require.NoError(t, s.ResetSchedule())
+	var count int
+	require.NoError(t, s.DB().QueryRow(`SELECT COUNT(*) FROM schedule_overrides`).Scan(&count))
+	assert.Zero(t, count)
+	assert.True(t, s.GetBool("scheduler.paused", false))
+	assert.Empty(t, s.GetDefault("scheduler.persisted_schedule", "missing"))
+	assert.Equal(t, "22000", s.GetDefault("charger.max_power", ""))
 }

@@ -5,15 +5,17 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // SSEBroker manages Server-Sent Events connections.
 type SSEBroker struct {
-	mu      sync.RWMutex
-	clients map[chan string]struct{}
-	log     *slog.Logger
-	closed  bool
-	bootID  string
+	mu       sync.RWMutex
+	clients  map[chan string]struct{}
+	log      *slog.Logger
+	closed   bool
+	snapshot func() string
+	bootID   string
 }
 
 // NewSSEBroker creates a new SSE broker.
@@ -31,6 +33,13 @@ func (b *SSEBroker) SetBootID(id string) {
 	b.bootID = id
 }
 
+// SetSnapshot supplies the current state to every new or reconnected client.
+func (b *SSEBroker) SetSnapshot(snapshot func() string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.snapshot = snapshot
+}
+
 // ServeHTTP handles SSE client connections.
 func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
@@ -40,7 +49,8 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
@@ -52,6 +62,7 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.clients[ch] = struct{}{}
+	snapshot := b.snapshot
 	b.mu.Unlock()
 
 	defer func() {
@@ -71,10 +82,20 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, "event: bootid\ndata: %s\n\n", bootID)
 	}
 
+	if snapshot != nil {
+		_, _ = fmt.Fprintf(w, "event: status\ndata: %s\n\n", snapshot())
+	}
 	flusher.Flush()
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, "event: ping\ndata: keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		case msg, ok := <-ch:

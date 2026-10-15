@@ -757,6 +757,16 @@ func (s *Scheduler) Notify() {
 	})
 }
 
+// HasActiveTransaction reports whether a session must be protected from schedule cancellation.
+func (s *Scheduler) HasActiveTransaction() bool {
+	cpID := s.store.GetDefault("zappi.charge_box_id", "")
+	if cpID == "" {
+		return false
+	}
+	_, txnID, connected := s.charger.ConnectorStatus(cpID, 1)
+	return connected && txnID > 0
+}
+
 // NotifyImmediate triggers an immediate recompute and charge control check.
 // Use for physical events (connector status changes, boot) that should not wait.
 func (s *Scheduler) NotifyImmediate() {
@@ -1241,6 +1251,9 @@ func (s *Scheduler) recompute() {
 	_ = s.store.PurgeOldOverrides(now.Add(-7 * 24 * time.Hour))
 	overrides, _ := s.store.LoadOverrides(now)
 	forces, _ := splitOverrides(overrides)
+	for i := range forces {
+		forces[i].PowerW = cfg.MaxPower
+	}
 	forcePeriods := buildForcePeriods(forces, rates)
 	forceEnergy := totalForceEnergy(forcePeriods)
 
@@ -1248,7 +1261,9 @@ func (s *Scheduler) recompute() {
 	// has explicitly committed to those windows.
 	hasForces := len(forcePeriods) > 0
 
-	if len(rates) == 0 && !hasForces {
+	// Even without tariff data, removing the last manual window must clear
+	// its old schedule. Transaction freeze and active-period preservation still apply.
+	if len(rates) == 0 && !hasForces && prev == nil && !s.store.GetBool("scheduler.paused", false) {
 		return
 	}
 
@@ -1299,6 +1314,13 @@ func (s *Scheduler) recompute() {
 				skipKey = "no_energy_needed"
 			}
 		}
+	}
+
+	if s.store.GetBool("scheduler.paused", false) {
+		autoEligible = false
+		skipReason = "automatic scheduling paused"
+		skipKey = "user_cancelled"
+		skipParams = nil
 	}
 
 	var autoSched *Schedule
@@ -1358,7 +1380,20 @@ func (s *Scheduler) recompute() {
 		}
 		for i, slot := range sched.Slots {
 			if cancelled[slot.Date] {
-				sched.Slots[i].Cancelled = true
+				// A new manual selection must escape legacy day cancellation. Keep
+				// automatic periods cancelled without suppressing the user's selection.
+				var manual []SchedulePeriod
+				for _, period := range slot.Periods {
+					if period.IsForce() {
+						manual = append(manual, period)
+					}
+				}
+				if len(manual) > 0 {
+					sched.Slots[i].Periods = manual
+					recalcSlotTotals(&sched.Slots[i])
+				} else {
+					sched.Slots[i].Cancelled = true
+				}
 			}
 		}
 		var cost, energy float64
@@ -1470,9 +1505,7 @@ func (s *Scheduler) configFromStore() *Config {
 		cfg.TargetEnergy = s.store.GetFloat("scheduler.target_energy", 0)
 	}
 
-	if cfg.TargetEnergy <= 0 && cfg.TargetSoC <= 0 {
-		return nil
-	}
+	// A zero automatic target must not disable explicit manual windows.
 
 	return cfg
 }

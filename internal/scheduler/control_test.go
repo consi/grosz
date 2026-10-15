@@ -1580,3 +1580,45 @@ func TestRequestModeChange_AppliesLastMode(t *testing.T) {
 	assert.Equal(t, "off", st.GetDefault("charger.mode", ""))
 	assert.Equal(t, 1, mock.stops, "off mode applied must send RemoteStopTransaction for the active txn")
 }
+
+func TestWindowEditsDoNotInterruptActiveTransaction(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 99}
+	s, st := newTestScheduler(t, mock)
+	require.NoError(t, st.Set("charger.mode", "schedule"))
+	original := &Schedule{Slots: []ScheduleSlot{{Date: now.Format("2006-01-02"), Periods: []SchedulePeriod{{Start: now.Add(-time.Hour), End: now.Add(time.Hour), Power: 11000}}}}}
+	s.current = original
+	require.True(t, s.HasActiveTransaction())
+	id, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindBlock, Start: now, End: now.Add(time.Hour)})
+	require.NoError(t, err)
+	s.recompute()
+	s.controlCharging()
+	require.Same(t, original, s.current, "adding a block must not replace the running schedule")
+	_, err = st.SaveOverride(store.ScheduleOverride{ID: id, Kind: store.OverrideKindBlock, Start: now, End: now.Add(2 * time.Hour)}, nil)
+	require.NoError(t, err)
+	s.recompute()
+	s.controlCharging()
+	require.Same(t, original, s.current, "editing a block must not replace the running schedule")
+	require.NoError(t, st.DeleteOverride(id))
+	s.recompute()
+	s.controlCharging()
+	require.Same(t, original, s.current, "deleting a block must not replace the running schedule")
+	assert.Zero(t, mock.stops, "window mutations must never stop an active transaction")
+	assert.Zero(t, mock.clears)
+	assert.Zero(t, mock.profiles)
+}
+
+func TestRemovingLastForceClearsFutureScheduleWithoutRates(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Available"}
+	s, st := newTestScheduler(t, mock)
+	s.tariff = &mockTariff{}
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindForce, Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), PowerW: 11000})
+	require.NoError(t, err)
+	s.recompute()
+	require.NotNil(t, s.current)
+	require.NoError(t, st.DeleteOverride(id))
+	s.recompute()
+	assert.Nil(t, s.current, "deleting the last override must remove its stale schedule even without rates")
+	assert.Zero(t, mock.stops)
+}

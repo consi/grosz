@@ -204,7 +204,7 @@ func TestRecompute_BlockExcludesHourFromAutoSelection(t *testing.T) {
 	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
 
 	rates := []tariff.Rate{
-		{Start: now, End: now.Add(time.Hour), Price: 0.10},      // cheapest
+		{Start: now, End: now.Add(time.Hour), Price: 0.10}, // cheapest
 		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.30},
 		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Price: 0.50},
 	}
@@ -228,4 +228,48 @@ func TestRecompute_BlockExcludesHourFromAutoSelection(t *testing.T) {
 				"blocked hour fragment must not appear")
 		}
 	}
+}
+
+func TestManualSelectionEscapesLegacyCancelledDay(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Available"}
+	s, st := newTestScheduler(t, mock)
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, st.Set("scheduler.target_energy", "11"))
+	s.tariff = &mockTariff{rates: []tariff.Rate{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: .3}}}
+	s.recompute()
+	require.NotNil(t, s.current)
+	slot := s.current.Slots[0]
+	require.True(t, s.CancelSlot(slot.Date))
+	period := slot.Periods[0]
+	_, err := st.ApplyOverride(store.ScheduleOverride{Kind: store.OverrideKindForce, Start: period.Start, End: period.End, PowerW: 11000}, nil)
+	require.NoError(t, err)
+	s.recompute()
+	require.NotNil(t, s.current)
+	require.NotEmpty(t, s.current.ActivePeriods())
+	assert.False(t, s.current.Slots[0].Cancelled)
+	assert.True(t, s.current.ActivePeriods()[0].IsForce())
+	assert.Zero(t, mock.stops)
+}
+
+func TestResetPausesAutoButAllowsManualWindows(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Available"}
+	s, st := newTestScheduler(t, mock)
+	now := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, st.Set("scheduler.target_energy", "11"))
+	s.tariff = &mockTariff{rates: []tariff.Rate{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: .3}}}
+	s.recompute()
+	require.NotNil(t, s.current)
+	require.NoError(t, st.ResetSchedule())
+	s.ClearSchedule()
+	s.recompute()
+	assert.Nil(t, s.current)
+	assert.Equal(t, "user_cancelled", s.skipReasonKey)
+	_, err := st.ApplyOverride(store.ScheduleOverride{Kind: store.OverrideKindForce, Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), PowerW: 11000}, nil)
+	require.NoError(t, err)
+	s.recompute()
+	require.NotNil(t, s.current)
+	require.Len(t, s.current.ActivePeriods(), 1)
+	assert.True(t, s.current.ActivePeriods()[0].IsForce())
+	assert.Equal(t, "user_cancelled", s.skipReasonKey)
+	assert.Zero(t, mock.stops)
 }

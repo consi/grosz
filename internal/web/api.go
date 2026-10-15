@@ -153,19 +153,45 @@ func (s *Server) handleSetSchedule(w http.ResponseWriter, r *http.Request) {
 		MaxPrice:        s.store.GetFloat("scheduler.max_price", 0),
 		ChargeHeadroom:  s.store.GetFloat("scheduler.charge_headroom", 3),
 	}
+	if err := s.store.Set("scheduler.paused", "false"); err != nil {
+		s.internalError(w, "failed to resume scheduling", err)
+		return
+	}
 	s.scheduler.SetConfig(cfg)
 
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "schedule": s.scheduler.Schedule()})
 }
 
+// Schedule editing must never interrupt a transaction that requires replugging to resume.
+func (s *Server) rejectActiveScheduleCancellation(w http.ResponseWriter) bool {
+	if s.scheduler != nil && s.scheduler.HasActiveTransaction() {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "Current charging session is protected; wait for it to end before cancelling the schedule"})
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleDeleteSchedule(w http.ResponseWriter, r *http.Request) {
+	if s.rejectActiveScheduleCancellation(w) {
+		return
+	}
+	if err := s.store.ResetSchedule(); err != nil {
+		s.internalError(w, "failed to clear schedule", err)
+		return
+	}
 	if s.scheduler != nil {
 		s.scheduler.ClearSchedule()
+		s.scheduler.Notify()
 	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) handleCancelSlot(w http.ResponseWriter, r *http.Request) {
+	if s.rejectActiveScheduleCancellation(w) {
+		return
+	}
 	date := r.PathValue("date")
 	if date == "" {
 		http.Error(w, "date required", http.StatusBadRequest)
@@ -179,6 +205,7 @@ func (s *Server) handleCancelSlot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "slot not found", http.StatusNotFound)
 		return
 	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "schedule": s.scheduler.Schedule()})
 }
 
@@ -196,6 +223,7 @@ func (s *Server) handleRestoreSlot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "slot not found", http.StatusNotFound)
 		return
 	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "schedule": s.scheduler.Schedule()})
 }
 
@@ -212,10 +240,13 @@ func (s *Server) handleListOverrides(w http.ResponseWriter, r *http.Request) {
 }
 
 type createOverrideRequest struct {
-	Kind   string  `json:"kind"`
-	Start  string  `json:"start"`
-	End    string  `json:"end"`
-	PowerW float64 `json:"powerW"`
+	Kind     string `json:"kind"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Original *struct {
+		Start time.Time `json:"start"`
+		End   time.Time `json:"end"`
+	} `json:"original,omitempty"`
 }
 
 func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
@@ -243,35 +274,50 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{"error": "kind must be 'force' or 'block'"})
 		return
 	}
+	powerW := 0.0
 	if req.Kind == store.OverrideKindForce {
-		if req.PowerW <= 0 {
-			writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{"error": "force override requires powerW > 0"})
+		powerW = s.store.GetFloat("charger.max_power", 11000)
+	}
+	var idToUpdate int64
+	if r.Method == http.MethodPut {
+		var err error
+		idToUpdate, err = strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil || idToUpdate <= 0 {
+			http.Error(w, "invalid id", http.StatusBadRequest)
 			return
 		}
-		maxPower := s.store.GetFloat("charger.max_power", 11000)
-		if req.PowerW > maxPower {
-			writeJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{"error": fmt.Sprintf("powerW %.0f exceeds charger.max_power %.0f", req.PowerW, maxPower)})
+	}
+	var original *store.ScheduleOverride
+	if req.Original != nil {
+		if idToUpdate != 0 || req.Kind != store.OverrideKindForce || !req.Original.End.After(req.Original.Start) {
+			http.Error(w, "invalid original period", http.StatusUnprocessableEntity)
 			return
 		}
+		original = &store.ScheduleOverride{Start: req.Original.Start, End: req.Original.End}
 	}
 
 	o := store.ScheduleOverride{
+		ID:     idToUpdate,
 		Kind:   req.Kind,
 		Start:  start,
 		End:    end,
-		PowerW: req.PowerW,
+		PowerW: powerW,
 	}
-	id, err := s.store.InsertOverride(o)
+	id, err := s.store.ApplyOverride(o, original)
 	input := map[string]any{
 		"kind":   req.Kind,
 		"start":  start.Format(time.RFC3339),
 		"end":    end.Format(time.RFC3339),
-		"powerW": req.PowerW,
+		"powerW": powerW,
 	}
 	if err != nil {
 		events.Warn(s.store, events.SourceScheduler, events.ActionCreateOverride,
 			input, map[string]any{"error": err.Error()},
 		)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		if errors.Is(err, store.ErrOverlap) {
 			writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "overlaps existing override"})
 			return
@@ -286,8 +332,9 @@ func (s *Server) handleCreateOverride(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if s.scheduler != nil {
-		s.scheduler.NotifyImmediate()
+		s.scheduler.Notify()
 	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "override": o, "schedule": s.schedulerSchedule()})
 }
 
@@ -317,8 +364,9 @@ func (s *Server) handleDeleteOverride(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if s.scheduler != nil {
-		s.scheduler.NotifyImmediate()
+		s.scheduler.Notify()
 	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "schedule": s.schedulerSchedule()})
 }
 

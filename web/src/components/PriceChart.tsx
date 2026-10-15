@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import type { Rate, Schedule, HourlyEnergy } from '../types';
 import { useTranslation } from '../i18n';
+import { PeriodEditor } from './PeriodEditor';
+import type { ChargingWindow, SaveOverride } from '../utils/schedule';
 
 export interface ChartMarker {
   time: string; // ISO timestamp
@@ -13,6 +15,8 @@ interface Props {
   consumption?: HourlyEnergy[];
   markers?: ChartMarker[];
   timezone: string;
+  onCreateOverride: SaveOverride;
+  sessionActive: boolean;
 }
 
 function formatEnergy(wh: number): string {
@@ -96,7 +100,8 @@ function storedPercentiles(): { lower: number; upper: number } {
     : { lower: DEFAULT_LOWER_PERCENTILE, upper: DEFAULT_UPPER_PERCENTILE };
 }
 
-export function PriceChart({ rates, schedule, consumption, markers, timezone }: Props) {
+export function PriceChart({ rates, schedule, consumption, markers, timezone, onCreateOverride, sessionActive }: Props) {
+  const [scheduling, setScheduling] = useState<ChargingWindow | null>(null);
   const { t, locale } = useTranslation();
   const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
   const [zoom, setZoom] = useState<{ startMs: number; endMs: number } | null>(null);
@@ -122,7 +127,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
     }
   }, []);
 
-  // If the zoom window no longer covers ≥2 rates after a refresh, fall back to
+  // If the zoom window no longer covers any rates after a refresh, fall back to
   // the full range so the chart stays renderable. The zoom state remains and
   // will recover automatically if fresh rates reintroduce the window.
   const viewRates = useMemo(() => {
@@ -132,7 +137,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
       const e = new Date(r.end).getTime();
       return e > zoom.startMs && s < zoom.endMs;
     });
-    return filtered.length >= 2 ? filtered : rates;
+    return filtered.length >= 1 ? filtered : rates;
   }, [rates, zoom]);
 
   if (!rates?.length) {
@@ -326,7 +331,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
       if (rect.width > 0 && barCount > 0 && b - a >= DRAG_THRESHOLD_PX) {
         const firstIdx = idxAtX(a, rect);
         const lastIdx = idxAtX(b, rect);
-        if (lastIdx > firstIdx) {
+        if (lastIdx >= firstIdx) {
           const startMs = new Date(viewRates[firstIdx].start).getTime();
           const endMs = new Date(viewRates[lastIdx].end).getTime();
           setZoom({ startMs, endMs });
@@ -358,7 +363,29 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone }: 
 
   return (
     <div className="card">
-      <h2>{t('price.heading')}</h2>
+      <div className="chart-heading">
+        <h2>{t('price.heading')}</h2>
+        <div className="chart-actions">
+          {zoom && <button className="icon-btn" title={t('price.resetZoom')} aria-label={t('price.resetZoom')} onClick={() => { setZoom(null); setHover(null); }}>↺</button>}
+          <button className="chart-schedule-btn" title={t('price.scheduleVisible')} aria-label={t('price.scheduleVisible')}
+            disabled={Date.parse(viewRates[viewRates.length - 1].end) <= now.getTime()}
+            onClick={() => setScheduling({
+              start: new Date(Math.max(Date.now(), Date.parse(viewRates[0].start))).toISOString(),
+              end: viewRates[viewRates.length - 1].end,
+            })}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="16" rx="3" /><path d="M7 3v4m10-4v4M3 10h18m-8 2-3 4h4l-3 4" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      {scheduling && <div className="chart-schedule-editor" role="region" aria-label={t('price.scheduleVisible')}>
+        <PeriodEditor initial={scheduling} timezone={timezone} sessionActive={sessionActive} onCancel={() => setScheduling(null)} onSave={async (window) => {
+          const result = await onCreateOverride({ kind: 'force', ...window });
+          if (result.ok) setScheduling(null);
+          return result;
+        }} />
+      </div>}
       <div className="price-stats">
         <span>{t('price.min', { value: minPrice.toFixed(3) })}</span>
         <span>{t('price.avg', { value: avgPrice.toFixed(3) })}</span>

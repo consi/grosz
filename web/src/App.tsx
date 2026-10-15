@@ -16,6 +16,7 @@ import { usePullToRefresh } from './hooks/usePullToRefresh';
 import { I18nProvider, useTranslation, browserLocale } from './i18n';
 import type { Locale, TranslationKey } from './i18n';
 import type { StatusResponse, Rate, HourlyEnergy, MeterLive } from './types';
+import type { SaveOverride, DeleteOverride, MutationResult } from './utils/schedule';
 import './App.css';
 
 type Tab = 'dashboard' | 'reporting' | 'log' | 'syslog' | 'settings';
@@ -62,7 +63,6 @@ function App() {
   const [chartMarkers, setChartMarkers] = useState<ChartMarker[]>([]);
   const [timezone, setTimezone] = useState<string>(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const [locale, setLocale] = useState<Locale>(browserLocale);
-  const [defaultPowerW, setDefaultPowerW] = useState<number>(11000);
   const initialBootIdRef = useRef<string | null>(null);
   const [newVersionAvailable, setNewVersionAvailable] = useState(false);
   const [versionInfo, setVersionInfo] = useState<{ version: string; commit: string; bootId: string } | null>(null);
@@ -83,6 +83,34 @@ function App() {
       return r;
     });
   }, []);
+
+  const statusRequest = useRef(0);
+  const scheduleRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [scheduleRefreshing, setScheduleRefreshing] = useState(false);
+  const refreshStatus = useCallback(async () => {
+    const request = ++statusRequest.current;
+    try {
+      const response = await apiFetch('/api/status');
+      if (!response.ok) return;
+      const next = await response.json();
+      if (request === statusRequest.current) setStatus(next);
+    } catch { /* Auth errors are handled by apiFetch; polling retries transient failures. */ }
+  }, [apiFetch]);
+
+  // Recover missed SSE events and refresh immediately when returning to the app.
+  useEffect(() => {
+    if (!authed) return;
+    const refresh = () => { if (document.visibilityState === 'visible') void refreshStatus(); };
+    const interval = window.setInterval(refresh, 20000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      if (scheduleRefreshTimer.current) clearTimeout(scheduleRefreshTimer.current);
+    };
+  }, [authed, refreshStatus]);
 
   // Check auth on mount. Only treat 401 as "not authenticated"; transient
   // proxy errors (502/503 during a deploy) and network errors must not kick
@@ -134,7 +162,7 @@ function App() {
   // Initial data fetch
   useEffect(() => {
     if (!authed) return;
-    apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+    void Promise.resolve().then(refreshStatus);
     apiFetch('/api/tariff/rates').then((r) => r.json()).then((d) => setRates(d.rates || [])).catch(() => {});
     apiFetch('/api/meter/hourly').then((r) => r.json()).then(setConsumption).catch(() => {});
     apiFetch('/api/meter/live').then((r) => r.json()).then((d) => { if (d.timestamp) setMeterLive(d); }).catch(() => {});
@@ -144,10 +172,8 @@ function App() {
     apiFetch('/api/settings').then((r) => r.json()).then((s) => {
       if (s['display.timezone']) setTimezone(s['display.timezone']);
       if (s['display.language']) setLocale(s['display.language'] as Locale);
-      const mp = parseFloat(s['charger.max_power']);
-      if (isFinite(mp) && mp > 0) setDefaultPowerW(mp);
     }).catch(() => {});
-  }, [authed, apiFetch]);
+  }, [authed, apiFetch, refreshStatus]);
 
   // Refresh consumption data periodically (DB aggregation, not real-time)
   useEffect(() => {
@@ -183,7 +209,7 @@ function App() {
       }
       try {
         const parsed = JSON.parse(data);
-        if (event === 'status') setStatus(parsed);
+        if (event === 'status') { statusRequest.current++; setStatus(parsed); }
         if (event === 'rates') setRates(parsed.rates || []);
         if (event === 'meter') setMeterLive(parsed);
       } catch { /* ignore */ }
@@ -204,12 +230,12 @@ function App() {
   // Pull-to-refresh
   const [refreshKey, setRefreshKey] = useState(0);
   const refreshDashboard = useCallback(() => {
-    apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+    void refreshStatus();
     apiFetch('/api/tariff/rates').then((r) => r.json()).then((d) => setRates(d.rates || [])).catch(() => {});
     apiFetch('/api/meter/hourly').then((r) => r.json()).then(setConsumption).catch(() => {});
     apiFetch('/api/meter/live').then((r) => r.json()).then((d) => { if (d.timestamp) setMeterLive(d); }).catch(() => {});
     apiFetch('/api/chart-markers?hours=72').then((r) => r.json()).then((d) => { if (Array.isArray(d)) setChartMarkers(d); }).catch(() => {});
-  }, [apiFetch]);
+  }, [apiFetch, refreshStatus]);
 
   const handlePullRefresh = useCallback(() => {
     if (tab === 'dashboard') {
@@ -236,10 +262,10 @@ function App() {
     if (Number.isNaN(applyAt)) return;
     const delay = Math.max(0, applyAt - Date.now()) + 200;
     const id = window.setTimeout(() => {
-      apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+      void refreshStatus();
     }, delay);
     return () => window.clearTimeout(id);
-  }, [status.pendingMode, status.pendingModeApplyAt, apiFetch]);
+  }, [status.pendingMode, status.pendingModeApplyAt, refreshStatus]);
 
   const handleModeChange = async (mode: 'off' | 'schedule' | 'force') => {
     // Server debounces 5s before applying. Optimistically mark the click
@@ -260,7 +286,7 @@ function App() {
         setTimeout(() => setModeError(null), 8000);
       }
     } catch { /* handled by apiFetch */ }
-    apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+    void refreshStatus();
   };
 
   // handleSocTargetChange writes the car's charge limit to the Renault API. The
@@ -275,74 +301,43 @@ function App() {
         body: JSON.stringify({ target }),
       });
       if (!resp.ok) return false;
-      apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
+      void refreshStatus();
       return true;
     } catch {
       return false;
     }
   };
 
-  const handleScheduleApply = async () => {
-    await apiFetch('/api/schedule', { method: 'POST' }).catch(() => null);
-    apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
-    apiFetch('/api/tariff/rates').then((r) => r.json()).then((d) => setRates(d.rates || [])).catch(() => {});
-    apiFetch('/api/meter/hourly').then((r) => r.json()).then(setConsumption).catch(() => {});
-    apiFetch('/api/chart-markers?hours=72').then((r) => r.json()).then((d) => { if (Array.isArray(d)) setChartMarkers(d); }).catch(() => {});
-  };
-
-  const handleScheduleCancel = async () => {
-    await apiFetch('/api/schedule', { method: 'DELETE' }).catch(() => {});
-    apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
-    apiFetch('/api/tariff/rates').then((r) => r.json()).then((d) => setRates(d.rates || [])).catch(() => {});
-    apiFetch('/api/meter/hourly').then((r) => r.json()).then(setConsumption).catch(() => {});
-    apiFetch('/api/chart-markers?hours=72').then((r) => r.json()).then((d) => { if (Array.isArray(d)) setChartMarkers(d); }).catch(() => {});
-  };
-
-  const handleSlotCancel = async (date: string) => {
-    const resp = await apiFetch(`/api/schedule/${date}`, { method: 'DELETE' }).catch(() => null);
-    if (resp?.ok) {
-      const data = await resp.json();
-      if (data.schedule) {
-        setStatus((s) => ({ ...s, schedule: data.schedule }));
-      }
-    }
-  };
-
-  const handleSlotRestore = async (date: string) => {
-    const resp = await apiFetch(`/api/schedule/${date}/restore`, { method: 'POST' }).catch(() => null);
-    if (resp?.ok) {
-      const data = await resp.json();
-      if (data.schedule) {
-        setStatus((s) => ({ ...s, schedule: data.schedule }));
-      }
-    }
-  };
-
-  const handleCreateOverride = async (payload: { kind: 'force' | 'block'; start: string; end: string; powerW: number }): Promise<{ ok: boolean; error?: string }> => {
+  const mutateSchedule = async (url: string, method: string, payload?: unknown): Promise<MutationResult> => {
     try {
-      const r = await apiFetch('/api/schedule/overrides', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const r = await apiFetch(url, {
+        method,
+        headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+        body: payload ? JSON.stringify(payload) : undefined,
       });
-      const data = await r.json();
-      if (!r.ok) return { ok: false, error: data?.error || `HTTP ${r.status}` };
-      // Refresh status (also updates overrides + schedule)
-      apiFetch('/api/status').then((res) => res.json()).then(setStatus).catch(() => {});
+      if (!r.ok) {
+        const message = await r.text();
+        try { return { ok: false, error: JSON.parse(message).error }; }
+        catch { return { ok: false, error: message || `HTTP ${r.status}` }; }
+      }
+      // The immediate snapshot contains saved overrides, but the computed
+      // schedule changes only after the debounce. Recover even if SSE is lost.
+      await refreshStatus();
+      setScheduleRefreshing(true);
+      if (scheduleRefreshTimer.current) clearTimeout(scheduleRefreshTimer.current);
+      scheduleRefreshTimer.current = setTimeout(async () => {
+        await refreshStatus();
+        setScheduleRefreshing(false);
+      }, 5500);
       return { ok: true };
-    } catch (e) {
-      return { ok: false, error: String(e) };
-    }
+    } catch (e) { return { ok: false, error: String(e) }; }
   };
-
-  const handleDeleteOverride = async (id: number): Promise<void> => {
-    try {
-      await apiFetch(`/api/schedule/overrides/${id}`, { method: 'DELETE' });
-      apiFetch('/api/status').then((r) => r.json()).then(setStatus).catch(() => {});
-    } catch {
-      /* handled by apiFetch */
-    }
-  };
+  const handleScheduleApply = () => mutateSchedule('/api/schedule', 'POST');
+  const handleScheduleCancel = () => mutateSchedule('/api/schedule', 'DELETE');
+  const handleCreateOverride: SaveOverride = (payload, id) => mutateSchedule(
+    `/api/schedule/overrides${id === undefined ? '' : `/${id}`}`, id === undefined ? 'POST' : 'PUT', payload,
+  );
+  const handleDeleteOverride: DeleteOverride = (id) => mutateSchedule(`/api/schedule/overrides/${id}`, 'DELETE');
 
   const handleLogout = async () => {
     await fetch('/api/logout', { method: 'POST' });
@@ -372,18 +367,16 @@ function App() {
         tab={tab} setTab={setTab}
         renaultTfaAutoStart={renaultTfaAutoStart}
         onRenaultTfaAutoStartConsumed={() => setRenaultTfaAutoStart(false)}
+        scheduleRefreshing={scheduleRefreshing}
         status={status} rates={rates} consumption={consumption}
         meterLive={meterLive} chartMarkers={chartMarkers}
         timezone={timezone} locale={locale} setLocale={setLocale}
         pulling={pulling} pullDistance={pullDistance} refreshing={refreshing}
         modeError={modeError} refreshKey={refreshKey}
-        defaultPowerW={defaultPowerW}
         onModeChange={handleModeChange}
         onSocTargetChange={handleSocTargetChange}
         onScheduleApply={handleScheduleApply}
         onScheduleCancel={handleScheduleCancel}
-        onSlotCancel={handleSlotCancel}
-        onSlotRestore={handleSlotRestore}
         onCreateOverride={handleCreateOverride}
         onDeleteOverride={handleDeleteOverride}
         onLogout={handleLogout}
@@ -394,33 +387,33 @@ function App() {
 
 function AppContent({
   tab, setTab,
-  status, rates, consumption, meterLive, chartMarkers,
+  status, scheduleRefreshing, rates, consumption, meterLive, chartMarkers,
   timezone, locale, setLocale,
   pulling, pullDistance, refreshing,
   modeError, refreshKey,
-  defaultPowerW, versionInfo,
+  versionInfo,
   renaultTfaAutoStart, onRenaultTfaAutoStartConsumed,
-  onModeChange, onSocTargetChange, onScheduleApply, onScheduleCancel, onSlotCancel, onSlotRestore,
+  onModeChange, onSocTargetChange, onScheduleApply, onScheduleCancel,
   onCreateOverride, onDeleteOverride, onLogout,
 }: {
   tab: Tab; setTab: (t: Tab) => void;
+  scheduleRefreshing: boolean;
   status: StatusResponse; rates: Rate[]; consumption: HourlyEnergy[];
   meterLive: MeterLive | null; chartMarkers: ChartMarker[];
   timezone: string; locale: Locale; setLocale: (l: Locale) => void;
   pulling: boolean; pullDistance: number; refreshing: boolean;
   modeError: string | null; refreshKey: number;
-  defaultPowerW: number;
   versionInfo: { version: string; commit: string; bootId: string } | null;
   renaultTfaAutoStart: boolean; onRenaultTfaAutoStartConsumed: () => void;
   onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
   onSocTargetChange: (target: number) => Promise<boolean>;
-  onScheduleApply: () => void; onScheduleCancel: () => void;
-  onSlotCancel: (date: string) => void; onSlotRestore: (date: string) => void;
-  onCreateOverride: (payload: { kind: 'force' | 'block'; start: string; end: string; powerW: number }) => Promise<{ ok: boolean; error?: string }>;
-  onDeleteOverride: (id: number) => Promise<void>;
+  onScheduleApply: () => Promise<MutationResult>; onScheduleCancel: () => Promise<MutationResult>;
+  onCreateOverride: SaveOverride;
+  onDeleteOverride: DeleteOverride;
   onLogout: () => void;
 }) {
   const { t } = useTranslation();
+  const sessionActive = status.chargePoints.some((cp) => cp.connected && cp.connectors.some((c) => (c.transactionId || 0) > 0));
 
   return (
     <div className="app">
@@ -454,7 +447,7 @@ function AppContent({
                 onModeChange={onModeChange}
                 error={modeError}
               />
-              <PriceChart rates={rates} schedule={status.schedule} consumption={consumption} markers={chartMarkers} timezone={timezone} />
+              <PriceChart rates={rates} schedule={status.schedule} consumption={consumption} markers={chartMarkers} timezone={timezone} onCreateOverride={onCreateOverride} sessionActive={sessionActive} />
             </div>
             <div className="dashboard-col">
               <GridStatus data={meterLive} />
@@ -475,19 +468,18 @@ function AppContent({
               />
               <ScheduleForm
                 schedule={status.schedule}
+                refreshing={scheduleRefreshing}
+                sessionActive={sessionActive}
                 overrides={status.overrides || []}
                 skipReason={status.skipReason}
                 skipReasonKey={status.skipReasonKey}
                 skipReasonParams={status.skipReasonParams}
                 onApply={onScheduleApply}
                 onCancel={onScheduleCancel}
-                onSlotCancel={onSlotCancel}
-                onSlotRestore={onSlotRestore}
                 onCreateOverride={onCreateOverride}
                 onDeleteOverride={onDeleteOverride}
                 timezone={timezone}
-                defaultPowerW={defaultPowerW}
-              />
+                      />
             </div>
           </div>
         )}

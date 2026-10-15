@@ -68,6 +68,14 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 		challenges: newChallengeStore(),
 	}
 
+	s.sse.SetSnapshot(func() string {
+		data, err := json.Marshal(s.buildStatus())
+		if err != nil {
+			return "{}"
+		}
+		return string(data)
+	})
+
 	s.migratePasswordHash()
 	s.purgeExpiredSessions()
 
@@ -104,6 +112,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("POST /api/schedule/{date}/restore", s.requireAuth(s.handleRestoreSlot))
 	mux.HandleFunc("GET /api/schedule/overrides", s.requireAuth(s.handleListOverrides))
 	mux.HandleFunc("POST /api/schedule/overrides", s.requireAuth(s.handleCreateOverride))
+	mux.HandleFunc("PUT /api/schedule/overrides/{id}", s.requireAuth(s.handleCreateOverride))
 	mux.HandleFunc("DELETE /api/schedule/overrides/{id}", s.requireAuth(s.handleDeleteOverride))
 	mux.HandleFunc("POST /api/charger/{id}/start", s.requireAuth(s.handleChargerStart))
 	mux.HandleFunc("POST /api/charger/{id}/stop", s.requireAuth(s.handleChargerStop))
@@ -196,10 +205,10 @@ func (s *Server) buildStatus() any {
 	cps := s.ocpp.ChargePoints()
 
 	type connectorInfo struct {
-		ID            int                                `json:"id"`
-		Status        string                             `json:"status"`
-		TransactionID int                                `json:"transactionId,omitempty"`
-		Measurements  map[string]ocpp.Measurement        `json:"measurements,omitempty"`
+		ID            int                         `json:"id"`
+		Status        string                      `json:"status"`
+		TransactionID int                         `json:"transactionId,omitempty"`
+		Measurements  map[string]ocpp.Measurement `json:"measurements,omitempty"`
 	}
 	type cpInfo struct {
 		ID          string          `json:"id"`
@@ -212,30 +221,30 @@ func (s *Server) buildStatus() any {
 		Connectors  []connectorInfo `json:"connectors"`
 	}
 	type statusResponse struct {
-		ChargePoints          []cpInfo                  `json:"chargePoints"`
-		Schedule              *scheduler.Schedule       `json:"schedule,omitempty"`
-		Overrides             []store.ScheduleOverride  `json:"overrides"`
-		Charging              bool                      `json:"charging"`
-		Mode                  string                    `json:"mode"`
-		PendingMode           string                    `json:"pendingMode,omitempty"`
-		PendingModeApplyAt    string                    `json:"pendingModeApplyAt,omitempty"`
-		SoC                   float64                   `json:"soc"`
-		MinSoC                float64                   `json:"minSoc"`
-		SkipAboveSoC          float64                   `json:"skipAboveSoc"`
-		SocTarget             float64                   `json:"socTarget"`
-		SkipReason            string                    `json:"skipReason,omitempty"`
-		SkipReasonKey         string                    `json:"skipReasonKey,omitempty"`
-		SkipReasonParams      map[string]string         `json:"skipReasonParams,omitempty"`
-		DeadlineTime          string                    `json:"deadlineTime"`
-		BatteryAutonomy       int                       `json:"batteryAutonomy"`
-		ChargingStatus        float64                   `json:"chargingStatus"`
-		PlugStatus            int                       `json:"plugStatus"`
-		ChargingRemainingTime int                       `json:"chargingRemainingTime"`
-		BatteryTimestamp      string                    `json:"batteryTimestamp,omitempty"`
-		VehicleModel          string                    `json:"vehicleModel,omitempty"`
-		VehiclePicture        string                    `json:"vehiclePicture,omitempty"`
-		Mileage               float64                   `json:"mileage"`
-		RenaultTfaRequired    bool                      `json:"renaultTfaRequired"`
+		ChargePoints          []cpInfo                 `json:"chargePoints"`
+		Schedule              *scheduler.Schedule      `json:"schedule,omitempty"`
+		Overrides             []store.ScheduleOverride `json:"overrides"`
+		Charging              bool                     `json:"charging"`
+		Mode                  string                   `json:"mode"`
+		PendingMode           string                   `json:"pendingMode,omitempty"`
+		PendingModeApplyAt    string                   `json:"pendingModeApplyAt,omitempty"`
+		SoC                   float64                  `json:"soc"`
+		MinSoC                float64                  `json:"minSoc"`
+		SkipAboveSoC          float64                  `json:"skipAboveSoc"`
+		SocTarget             float64                  `json:"socTarget"`
+		SkipReason            string                   `json:"skipReason,omitempty"`
+		SkipReasonKey         string                   `json:"skipReasonKey,omitempty"`
+		SkipReasonParams      map[string]string        `json:"skipReasonParams,omitempty"`
+		DeadlineTime          string                   `json:"deadlineTime"`
+		BatteryAutonomy       int                      `json:"batteryAutonomy"`
+		ChargingStatus        float64                  `json:"chargingStatus"`
+		PlugStatus            int                      `json:"plugStatus"`
+		ChargingRemainingTime int                      `json:"chargingRemainingTime"`
+		BatteryTimestamp      string                   `json:"batteryTimestamp,omitempty"`
+		VehicleModel          string                   `json:"vehicleModel,omitempty"`
+		VehiclePicture        string                   `json:"vehiclePicture,omitempty"`
+		Mileage               float64                  `json:"mileage"`
+		RenaultTfaRequired    bool                     `json:"renaultTfaRequired"`
 	}
 
 	result := make([]cpInfo, 0)
