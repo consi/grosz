@@ -48,6 +48,7 @@ const (
 	ActionFirmwareUpdateRequested Action = "firmwareUpdateRequested"
 	ActionChargerBoot             Action = "chargerBoot"
 	ActionStatusCheckTriggered    Action = "statusCheckTriggered"
+	ActionConnectionDropped       Action = "connectionDropped"
 )
 
 // tariff

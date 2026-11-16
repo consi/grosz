@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ws"
@@ -44,6 +45,7 @@ type TransactionEndedHook func(cpID string, connectorID int, transactionID int)
 // Server wraps the OCPP 1.6 Central System.
 type Server struct {
 	cs     ocpp16.CentralSystem
+	ws     *ws.Server
 	mu     sync.RWMutex
 	points map[string]*ChargePoint
 	// realAddrs maps cpID → resolved client IP captured from X-Forwarded-For
@@ -92,6 +94,7 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 
 	s := &Server{
 		cs:            cs,
+		ws:            wsServer,
 		points:        make(map[string]*ChargePoint),
 		realAddrs:     make(map[string]string),
 		store:         st,
@@ -184,6 +187,22 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 func (s *Server) Start(port int, path string) {
 	s.log.Info("starting OCPP server", "port", port, "path", path)
 	s.cs.Start(port, path)
+}
+
+// DropConnection closes one charge point's websocket, as a server restart
+// would. The myenergi cloud proxy reconnects on its own; in-memory connector
+// state is kept across the reconnect.
+func (s *Server) DropConnection(cpID string) error {
+	err := s.ws.StopConnection(cpID, websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "reconnect"})
+	result := map[string]any{"ok": err == nil}
+	if err != nil {
+		result["error"] = err.Error()
+		s.events.Warn(events.ActionConnectionDropped, map[string]any{"cpID": cpID}, result)
+		return err
+	}
+	s.log.Info("dropping charge point connection", "id", cpID)
+	s.events.Info(events.ActionConnectionDropped, map[string]any{"cpID": cpID}, result)
+	return nil
 }
 
 // Stop shuts down the OCPP server.

@@ -5,8 +5,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
-
 	"github.com/consi/grosz/internal/events"
 )
 
@@ -112,26 +110,5 @@ func (s *Scheduler) manageCarLimit(sched *Schedule, plugged, justUnplugged bool)
 	case want == 0 && !soon && raisedFrom != "":
 		_ = s.store.Set(settingFillRaisedFrom, "")
 		write(normal, "restore_after_fill")
-	}
-}
-
-// buildHoldProfile keeps an open transaction paused (0 W) for a day when
-// nothing is planned, instead of clearing the profile (which would let the
-// charger run at full power) or stopping the transaction (which parks Zappi
-// in Finishing until the cable is re-plugged).
-func buildHoldProfile(now time.Time) *types.ChargingProfile {
-	start := now.Truncate(time.Hour)
-	return &types.ChargingProfile{
-		ChargingProfileId:      1,
-		StackLevel:             0,
-		ChargingProfilePurpose: types.ChargingProfilePurposeTxDefaultProfile,
-		ChargingProfileKind:    types.ChargingProfileKindAbsolute,
-		ValidFrom:              types.NewDateTime(start),
-		ValidTo:                types.NewDateTime(start.Add(48 * time.Hour)),
-		ChargingSchedule: &types.ChargingSchedule{
-			ChargingRateUnit:       types.ChargingRateUnitWatts,
-			ChargingSchedulePeriod: []types.ChargingSchedulePeriod{{StartPeriod: 0, Limit: 0}},
-			StartSchedule:          types.NewDateTime(start),
-		},
 	}
 }

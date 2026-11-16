@@ -28,6 +28,10 @@ type mockCharger struct {
 	stops     int
 	clears    int
 	profiles  int
+	// profileAttempts counts refused writes (failingCharger).
+	profileAttempts int
+	reconnects      int
+	startErr        error
 }
 
 func (m *mockCharger) ConnectorStatus(cpID string, connectorID int) (string, int, bool) {
@@ -40,6 +44,13 @@ func (m *mockCharger) RemoteStartTransaction(cpID, idTag string, connectorID int
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.starts++
+	return m.startErr
+}
+
+func (m *mockCharger) Reconnect(cpID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconnects++
 	return nil
 }
 
@@ -581,9 +592,7 @@ func TestControlCharging_OffToForce(t *testing.T) {
 
 func TestControlCharging_ForceToSchedule_OutsideWindow(t *testing.T) {
 	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
+	withNow(t, now)
 
 	mock := &mockCharger{connected: true, status: "Charging", txnID: 1}
 	s, st := newTestScheduler(t, mock)
@@ -606,6 +615,9 @@ func TestControlCharging_ForceToSchedule_OutsideWindow(t *testing.T) {
 		}},
 	}
 
+	assert.Equal(t, 1, mock.clears, "force with an unknown profile: cleared so it can't deny power")
+
+	withNow(t, now.Add(profileWriteSpacing+time.Minute)) // respect write spacing
 	s.controlCharging()
 	assert.Equal(t, 0, mock.stops, "future block ahead: pause via profile, don't stop")
 	assert.Equal(t, 1, mock.profiles)
@@ -1174,7 +1186,10 @@ func TestControl_GapWithFutureBlockPausesInsteadOfStopping(t *testing.T) {
 	assert.Equal(t, 0, mock.stops)
 }
 
-func TestControl_GapStopsWhenProfileCannotBeWritten(t *testing.T) {
+// A refused profile write (Zappi "Not enough slots") must not end the
+// session: RemoteStop parks Zappi in Finishing and every later RemoteStart is
+// rejected until re-plug (live 2026-11-16, txn 97).
+func TestControl_GapKeepsChargingWhenProfileCannotBeWritten(t *testing.T) {
 	now := time.Now()
 	withNow(t, now)
 	fc := &failingCharger{mockCharger: mockCharger{connected: true, status: "Charging", txnID: 7}, failSet: true}
@@ -1185,7 +1200,9 @@ func TestControl_GapStopsWhenProfileCannotBeWritten(t *testing.T) {
 
 	s.controlCharging()
 
-	assert.Equal(t, 1, fc.stops, "without our profile on the charger, fall back to stopping")
+	assert.Equal(t, 0, fc.stops, "keep the transaction open rather than strand the car")
+	s.controlCharging()
+	assert.Equal(t, 0, fc.stops)
 }
 
 func TestControl_StopsWhenNothingMorePlanned(t *testing.T) {
@@ -1220,18 +1237,6 @@ func TestBuildPlanProfile_ZeroGapsAndLeadingZero(t *testing.T) {
 		got = append(got, [2]float64{float64(cp.StartPeriod), cp.Limit})
 	}
 	assert.Equal(t, [][2]float64{{0, 0}, {3600, 10800}, {3 * 3600, 0}, {5 * 3600, 10800}, {6 * 3600, 0}}, got)
-}
-
-// The plan hash must not change as time passes within the running block.
-func TestPlanHash_StableAcrossTime(t *testing.T) {
-	now := time.Now().Truncate(time.Hour).Add(10 * time.Minute)
-	sched := twoBlockPlan(now)
-	sched.Slots[0].Periods[0].End = now.Add(30 * time.Minute)
-	withNow(t, now)
-	h1 := planHash(sched)
-	withNow(t, now.Add(15*time.Minute))
-	h2 := planHash(sched)
-	assert.Equal(t, h1, h2)
 }
 
 // --- Fix 3: RequestModeChange debounce ---
@@ -1341,6 +1346,7 @@ func TestBlockWindowOverRunningSessionIsHonoured(t *testing.T) {
 
 	_, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindBlock, Start: now.Add(-time.Minute), End: now.Add(30 * time.Minute)})
 	require.NoError(t, err)
+	withNow(t, now.Add(profileWriteSpacing+time.Minute)) // respect write spacing
 	s.recompute()
 	s.controlCharging()
 

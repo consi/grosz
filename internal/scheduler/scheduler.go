@@ -23,6 +23,9 @@ type Charger interface {
 	RemoteStopTransaction(cpID string, txnID int) error
 	ClearChargingProfile(cpID string) error
 	SetChargingProfile(cpID string, connectorID int, profile *types.ChargingProfile) error
+	// Reconnect drops the charge point's OCPP websocket; the myenergi cloud
+	// proxy reconnects on its own within about a minute.
+	Reconnect(cpID string) error
 }
 
 // ServerCharger adapts *ocpp.Server to the Charger interface.
@@ -55,6 +58,10 @@ func (a *ServerCharger) ClearChargingProfile(cpID string) error {
 
 func (a *ServerCharger) SetChargingProfile(cpID string, connID int, p *types.ChargingProfile) error {
 	return a.S.SetChargingProfile(cpID, connID, p)
+}
+
+func (a *ServerCharger) Reconnect(cpID string) error {
+	return a.S.DropConnection(cpID)
 }
 
 // SchedulePeriod represents a single period in the charging schedule.
@@ -148,16 +155,23 @@ type Scheduler struct {
 
 	// Cooldown tracking for cloud-proxied chargers (e.g. Zappi via myenergi cloud).
 	// Commands are relayed slowly; duplicates queue up and cause issues.
-	lastStartSent   time.Time
-	lastStopSent    time.Time
-	lastProfileHash string    // planHash of the profile the charger last accepted ("" = none)
-	lastProfileSent time.Time // when last SetChargingProfile was sent
+	lastStartSent time.Time
+	lastStopSent  time.Time
 
-	// Profile write budget / backoff (see profilectl.go).
+	// Profile bookkeeping (see profilectl.go): what the charger holds,
+	// write backoff, and the last deferral logged.
 	profileMu             sync.Mutex
+	installedProf         installedProfile
 	profileFailures       int
 	profileBackoffUntil   time.Time
-	profileDeferredLogged string
+	profileDeferredLogged time.Time
+	profileDeferredWhy    string
+
+	// Finishing recovery (see recoverFinishing): when the OCPP connection
+	// was last dropped to unstick Finishing, and whether a start is due as
+	// soon as the charger is back.
+	lastFinishingReconnect time.Time
+	finishingStartPending  bool
 
 	// Pause bookkeeping: txn currently paused between plan blocks via the
 	// profile (0 = not paused), and since when the charger has reported
@@ -217,8 +231,8 @@ func New(charger Charger, tp tariff.Provider, st *store.Store, log *slog.Logger)
 	}
 	s.loadPersistedSchedule()
 	// The charger keeps its profile across our restarts; remembering what it
-	// holds avoids a pointless (budgeted) rewrite after every deploy.
-	s.lastProfileHash = st.GetDefault(settingProfileHash, "")
+	// holds (and the write budget / backoff) avoids rewrites after deploys.
+	s.loadProfileState()
 	go s.loop(ctx)
 	return s
 }
@@ -336,17 +350,6 @@ func (s *Scheduler) Stop() {
 	s.cancel()
 }
 
-// ResetProfileState clears the in-memory profile hash and cooldown,
-// forcing the next applyProfile to re-send. Called on BootNotification
-// because the charger lost its profile state after a restart.
-func (s *Scheduler) ResetProfileState() {
-	s.mu.Lock()
-	s.lastProfileHash = ""
-	s.lastProfileSent = time.Time{}
-	s.mu.Unlock()
-	_ = s.store.Set(settingProfileHash, "")
-}
-
 // Schedule returns the current schedule, or nil if none.
 func (s *Scheduler) Schedule() *Schedule {
 	s.mu.RLock()
@@ -388,35 +391,22 @@ func (s *Scheduler) ReloadConfig() {
 	s.NotifyImmediate()
 }
 
-// ClearSchedule removes the current schedule and clears the charging profile.
+// ClearSchedule removes the current schedule. The charger profile is left
+// alone: with no plan it already holds (or will be given) 0 W, and a force
+// session clears it only if it would actually deny power (ensureUnthrottled).
 func (s *Scheduler) ClearSchedule() {
 	s.mu.Lock()
 	s.current = nil
 	s.skipReason = ""
 	s.skipReasonKey = ""
 	s.skipParams = nil
-	hadProfile := s.lastProfileHash != ""
-	s.lastProfileHash = ""
 	s.mu.Unlock()
 
 	cpID := s.store.GetDefault("zappi.charge_box_id", "")
-	clearedProfile := false
-	if cpID != "" && hadProfile {
-		// Always drop the plan profile, also mid-transaction: a leftover
-		// zero-power gap would otherwise throttle a Force / manual session.
-		_, _, connected := s.charger.ConnectorStatus(cpID, 1)
-		if connected {
-			s.recordProfileWrite(timeNow())
-			if err := s.charger.ClearChargingProfile(cpID); err == nil {
-				clearedProfile = true
-			}
-		}
-	}
-	_ = s.store.Set(settingProfileHash, "")
-	s.log.Info("schedule cleared", "clearedProfile", clearedProfile)
+	s.log.Info("schedule cleared")
 	s.events.Info(events.ActionClearSchedule,
 		map[string]any{"cpID": cpID},
-		map[string]any{"cleared": true, "clearedProfile": clearedProfile},
+		map[string]any{"cleared": true},
 	)
 	s.saveCurrent()
 }
@@ -908,6 +898,9 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 			s.sendStop(cpID, txnID, "off")
 		}
 	case "force":
+		if pluggedIn {
+			s.ensureUnthrottled(cpID)
+		}
 		if pluggedIn && !hasTransaction {
 			blocked, skipReason := s.isVehiclePlugBlocked()
 			if blocked {
@@ -932,16 +925,16 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 		s.applyProfile(sched)
 
 		// After a stop, Zappi parks in Finishing until re-plug. If the plan
-		// (e.g. a new manual window) wants charging, try one RemoteStart per
-		// 30 min: the charger may reject it, which is harmless and logged.
+		// (e.g. a new manual window) wants charging, try to get out of it.
 		if status == "Finishing" && !hasTransaction {
-			if IsChargeTime(sched) && time.Since(s.lastFinishingStart) > 30*time.Minute {
-				s.lastFinishingStart = time.Now()
-				s.lastStartSent = time.Time{}
-				s.sendStartForced(cpID, "schedule", false)
+			if IsChargeTime(sched) {
+				s.recoverFinishing(cpID)
+			} else {
+				s.finishingStartPending = false
 			}
 			return
 		}
+		s.finishingStartPending = false
 		if !pluggedIn {
 			s.setPausedTxn(0)
 			return
@@ -979,9 +972,9 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 // idleTransaction handles an open transaction outside any planned period.
 // Stopping makes Zappi park in Finishing until the cable is re-plugged, so a
 // plugged-in car is only stopped when it is done (target reached and nothing
-// more planned) or, as a safety net, when the charger is drawing power while
-// it does not hold our profile. Otherwise the transaction stays open and the
-// profile's 0 W period (plan gap or hold) keeps it paused.
+// more planned). Otherwise the transaction stays open and the profile's 0 W
+// period (plan gap or hold) keeps it paused; if the profile write is still
+// pending the car keeps charging rather than being stranded in Finishing.
 func (s *Scheduler) idleTransaction(cpID string, txnID int, status string, sched *Schedule) {
 	target := s.normalTarget()
 	if sched != nil && sched.Target > 0 {
@@ -995,7 +988,7 @@ func (s *Scheduler) idleTransaction(cpID string, txnID int, status string, sched
 	switch {
 	case done:
 		s.sendStopReason(cpID, txnID, "schedule", "target_reached")
-	case s.profileInSync(sched):
+	case s.profilePausesNow():
 		if s.pausedTxn() != txnID {
 			s.setPausedTxn(txnID)
 			why := "plan_gap"
@@ -1008,14 +1001,22 @@ func (s *Scheduler) idleTransaction(cpID string, txnID int, status string, sched
 				map[string]any{"action": "pause", "why": why},
 			)
 		}
-	case status == "Charging":
-		s.sendStopReason(cpID, txnID, "schedule", "profile_not_in_sync")
 	default:
+		// The charger doesn't hold our profile yet (write deferred by the
+		// Zappi quota or backoff). Never stop here: a RemoteStop parks Zappi
+		// in Finishing and it rejects every RemoteStart until the cable is
+		// re-plugged, stranding the car. Charging a little outside the plan
+		// costs far less; the target check above still ends the session.
 		if s.holdLogged != txnID {
 			s.holdLogged = txnID
+			why := "charger_idle_profile_pending"
+			if status == "Charging" {
+				why = "charging_profile_pending"
+			}
+			s.log.Info("transaction kept open, profile not yet in sync", "txn", txnID, "status", status)
 			s.events.Info(events.ActionControlCharging,
-				map[string]any{"mode": "schedule", "cpID": cpID, "txnID": txnID, "status": status},
-				map[string]any{"action": "keep_open", "why": "charger_idle_profile_pending"},
+				map[string]any{"mode": "schedule", "cpID": cpID, "txnID": txnID, "status": status, "soc": soc},
+				map[string]any{"action": "keep_open", "why": why},
 			)
 		}
 	}
@@ -1055,16 +1056,14 @@ func (s *Scheduler) watchSuspendedEVSE(cpID string, txnID int, status string) {
 		map[string]any{"mode": "schedule", "cpID": cpID, "txnID": txnID, "status": status},
 		map[string]any{"action": "resync_profile", "reason": "suspended_evse_in_charge_period"},
 	)
-	s.mu.Lock()
-	s.lastProfileHash = ""
-	s.mu.Unlock()
+	s.setInstalled(installedProfile{}) // unknown: rewrite (still budgeted)
 }
 
-func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool) {
+func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool) error {
 	if !s.lastStartSent.IsZero() && time.Since(s.lastStartSent) < remoteCmdCooldown {
 		s.log.Debug("remote start already sent, waiting for cloud proxy",
 			"sentAgo", time.Since(s.lastStartSent).Round(time.Second))
-		return
+		return errStartCooldown
 	}
 	idTag := s.store.GetDefault("zappi.id_tag", "grosz")
 	s.log.Info("starting charge", "cpID", cpID, "mode", mode, "suspendedEVOverride", suspendedEVOverride)
@@ -1083,6 +1082,7 @@ func (s *Scheduler) sendStartForced(cpID, mode string, suspendedEVOverride bool)
 		map[string]any{"mode": mode, "cpID": cpID},
 		result,
 	)
+	return err
 }
 
 func (s *Scheduler) sendStop(cpID string, txnID int, mode string) {

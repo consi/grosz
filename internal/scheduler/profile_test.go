@@ -71,25 +71,6 @@ func TestBuildPlanProfileCapsBlocks(t *testing.T) {
 	assert.LessOrEqual(t, len(p.ChargingSchedule.ChargingSchedulePeriod), 2*maxProfileBlocks+1)
 }
 
-func TestPlanHash_Nil(t *testing.T) {
-	assert.Empty(t, planHash(nil))
-	assert.Empty(t, planHash(&Schedule{}))
-}
-
-func TestPlanHash_ChangesWhenFutureChanges(t *testing.T) {
-	now := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
-	withNow(t, now)
-	a := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000}}}}}
-	b := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{{Start: now.Add(time.Hour), End: now.Add(3 * time.Hour), Power: 11000}}}}}
-	assert.NotEqual(t, planHash(a), planHash(b))
-	// Hourly split vs one long period → same blocks → same hash (no rewrite).
-	c := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{
-		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000},
-		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
-	}}}}
-	assert.Equal(t, planHash(b), planHash(c))
-}
-
 func TestIsChargeTime(t *testing.T) {
 	now := time.Now()
 	sched := &Schedule{

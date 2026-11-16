@@ -59,3 +59,8 @@ func TestHydrateChargePointFromStore_NoRows(t *testing.T) {
 	assert.Empty(t, cp.Connectors)
 	cp.mu.RUnlock()
 }
+
+func TestDropConnection_UnknownChargePoint(t *testing.T) {
+	s, _ := newServerWithTempStore(t)
+	require.Error(t, s.DropConnection("nope"), "no open websocket for that id")
+}

@@ -255,3 +255,22 @@ func TestPlan_MustChargeFallsBackWhenUsualHoursMissing(t *testing.T) {
 	assert.Equal(t, ModeCharge, mode)
 	assert.NotEmpty(t, s.ActivePeriods())
 }
+
+// A plugged-in car charging toward the target must not flip to "wait" when
+// its SoC crosses Safe mid-session (live 2026-11-16: 59% → 60% re-planned,
+// the profile write hit the Zappi quota and the session was stopped).
+func TestPlan_ChargeModeLatchedWhilePlugged(t *testing.T) {
+	now, rates := eveningRates()
+	prev, mode := Plan(baseInput(now, rates, 45))
+	require.Equal(t, ModeCharge, mode)
+
+	in := baseInput(now.Add(10*time.Minute), rates, 65)
+	in.Prev = prev
+	s, mode := Plan(in)
+	require.NotNil(t, s)
+	assert.Equal(t, ModeCharge, mode, "stay in charge mode while plugged")
+
+	in.PluggedNow = false
+	_, mode = Plan(in)
+	assert.Equal(t, ModeWait, mode, "unplugged: free to defer again")
+}

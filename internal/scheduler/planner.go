@@ -42,7 +42,9 @@ const usableProbability = 0.3
 const gapFillPLN = 1.0
 
 // stickyPLN: keep the previous plan unless the new one is cheaper by more.
-const stickyPLN = 1.0
+// Raised from 1 PLN: a new plan may need a Zappi profile write, which is
+// scarce (~1/hour) and can strand a session when refused.
+const stickyPLN = 2.0
 
 // PlanInput is everything the planner needs. Pure data, no store access.
 type PlanInput struct {
@@ -194,7 +196,11 @@ func Plan(in PlanInput) (*Schedule, string) {
 		mode = ModeFull
 	default:
 		risky := in.SoC-in.DailyKWh/in.BatteryKWh*100 < in.Floor+10
-		must := in.SoC < in.Safe || trip || risky
+		// Once a plugged-in car is charging toward the target, don't flip to
+		// "wait" when SoC crosses Safe mid-session: that re-plans, needs a
+		// profile write the Zappi quota may refuse, and interrupts charging.
+		latched := in.PluggedNow && in.Prev != nil && in.Prev.Mode == ModeCharge
+		must := in.SoC < in.Safe || trip || risky || latched
 		deadline := readyBy
 		reason := ReasonNeeded
 		if trip {

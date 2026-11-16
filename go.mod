@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/go-webauthn/webauthn v0.18.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/lorenzodonini/ocpp-go v0.19.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.58.0
@@ -21,7 +22,6 @@ require (
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
