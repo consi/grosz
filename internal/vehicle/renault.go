@@ -44,7 +44,7 @@ const (
 // email-code completion flow (see renault_tfa.go).
 const gigyaErrPendingTFA = 403101
 
-// errRenaultRateLimited marks a Kamereon 429 ("err.func.wired.overloaded" —
+// errRenaultRateLimited marks a Kamereon 429 ("err.func.wired.overloaded":
 // quota exceeded). Callers use errors.Is to distinguish it from other failures
 // so they can log it as rate-limiting (the whole reason for the event-based
 // poller) and, critically, avoid writing back partial/zeroed values learned
@@ -58,7 +58,7 @@ type gigyaError struct {
 	op       string
 	code     int
 	message  string
-	details  string // Gigya errorDetails — names the offending parameter on 400006
+	details  string // Gigya errorDetails: names the offending parameter on 400006
 	regToken string
 }
 
@@ -169,7 +169,7 @@ func NewRenaultWithURL(st *store.Store, log *slog.Logger, kamereonURL string) *R
 		plugCh:      make(chan struct{}, 1),
 	}
 	// Restore the durable Gigya credentials so a restart reuses the existing
-	// login_token (and trusted device) instead of re-running accounts.login —
+	// login_token (and trusted device) instead of re-running accounts.login:
 	// which, under Renault's mandatory TFA, would force a fresh email-code flow.
 	r.session = st.GetDefault("vehicle.renault_session", "")
 	r.gmid = st.GetDefault("vehicle.renault_gmid", "")
@@ -197,7 +197,7 @@ func (r *Renault) Trigger() {
 }
 
 // SchedulePlugPoll asks the loop to poll shortly (plugPollDelay) after a socket
-// transition — plug, unplug, or charge-complete. Unlike Trigger it does not poll
+// transition: plug, unplug, or charge-complete. Unlike Trigger it does not poll
 // immediately: the short settle delay lets the Kamereon API reflect the new plug
 // state before we read it, and the poll resets the regular SoC cadence.
 // Non-blocking; coalesces a burst of transitions into a single poll.
@@ -222,7 +222,7 @@ const socLevelBackoff = time.Hour
 // socLevelRefresh is how often we re-read the (quasi-static) car-side charge
 // limits once known. socMin is one-time car config and socTarget only changes on
 // a user action we already write through, so we read once and then refresh
-// rarely — just enough to catch a change made directly in MyRenault — instead of
+// rarely (just enough to catch a change made directly in MyRenault) instead of
 // polling this strict-quota endpoint every slow-tier cycle (the old redundancy
 // that tripped the 429).
 const socLevelRefresh = 6 * time.Hour
@@ -237,7 +237,7 @@ func (r *Renault) pollInterval() time.Duration {
 	return time.Duration(m) * time.Minute
 }
 
-// pollIntervalUnplugged is the (slower) SoC cadence while unplugged — the car
+// pollIntervalUnplugged is the (slower) SoC cadence while unplugged: the car
 // can't be charged, so frequent polling would only burn rate-limited API calls.
 // A plug event still polls within plugPollDelay regardless.
 func (r *Renault) pollIntervalUnplugged() time.Duration {
@@ -267,7 +267,7 @@ func (r *Renault) nextInterval(plugged bool) time.Duration {
 }
 
 // socLevelBackedOff reports whether we're within a post-429 cooldown for the KCM
-// soc-level endpoint. Store-backed so the backoff survives restarts — otherwise
+// soc-level endpoint. Store-backed so the backoff survives restarts, otherwise
 // every boot Tier-B poll would fire a fresh call at the throttled endpoint and
 // keep the quota pinned.
 func (r *Renault) socLevelBackedOff() bool {
@@ -280,9 +280,9 @@ func (r *Renault) socLevelBackedOff() bool {
 }
 
 // shouldFetchSocLevel reports whether the car-side charge limits are due for a
-// read: either we've never learned socMin, or the last successful read is older
+// read, either we've never learned socMin, or the last successful read is older
 // than socLevelRefresh. This keeps us off the strict-quota KCM endpoint on the
-// common path — the values almost never change, and our own writes update them.
+// common path: the values almost never change, and our own writes update them.
 func (r *Renault) shouldFetchSocLevel() bool {
 	if _, known := r.cachedSocMin(); !known {
 		return true
@@ -345,7 +345,7 @@ func (r *Renault) SetOnUpdate(fn func(int)) {
 }
 
 // SetABRP registers the ABRP telemetry client used to forward vehicle data
-// after each successful poll. Optional — a nil client disables ABRP pushing.
+// after each successful poll. Optional: a nil client disables ABRP pushing.
 func (r *Renault) SetABRP(c *abrp.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -458,7 +458,7 @@ type abrpCache struct {
 }
 
 // pollOnce runs one poll cycle. Tier A (battery-status) always runs. The slow
-// tier (soc-level, cockpit, and — when ABRP is on — hvac/location) runs only
+// tier (soc-level, cockpit, and (when ABRP is on) hvac/location) runs only
 // when includeTierB, refreshing the in-memory caches. reason labels the trigger
 // in the system event. It returns whether the car is plugged, which sets the
 // cadence for the next scheduled poll.
@@ -547,13 +547,13 @@ func (r *Renault) pollOnce(user, pass, vin string, includeTierB bool, reason str
 		},
 	)
 
-	// A successful poll proves auth is healthy — clear any stale TFA flag.
+	// A successful poll proves auth is healthy: clear any stale TFA flag.
 	if r.store.GetBool("vehicle.renault_tfa_required", false) {
 		_ = r.store.Set("vehicle.renault_tfa_required", "false")
 	}
 
 	// Forward telemetry to ABRP (no-op unless a token is configured) from the
-	// cache — best-effort, so a battery-only poll still pushes recent GPS/temp.
+	// cache: best-effort, so a battery-only poll still pushes recent GPS/temp.
 	r.mu.RLock()
 	ac := r.abrp
 	r.mu.RUnlock()
@@ -565,7 +565,7 @@ func (r *Renault) pollOnce(user, pass, vin string, includeTierB bool, reason str
 }
 
 // pollTierB refreshes the slow-changing group: the car-side charge limits
-// (socMin/socTarget), the odometer, and — when ABRP is enabled — the climate and
+// (socMin/socTarget), the odometer, and (when ABRP is enabled) the climate and
 // GPS caches used for telemetry. All best-effort: an unsupported endpoint (older
 // KCA models) or a transient error simply leaves the previous cached values.
 func (r *Renault) pollTierB(vin string, cache *abrpCache) {
@@ -719,7 +719,7 @@ func (r *Renault) ensureAuth(user, pass string) error {
 			r.session = ""
 			r.mu.Unlock()
 			// Only drop the persisted login_token when Gigya positively rejected
-			// it (a structured API error), not on a transient transport error —
+			// it (a structured API error), not on a transient transport error:
 			// otherwise a network blip would force an unnecessary fresh login and
 			// re-trigger TFA. A fresh login next cycle re-mints (and may need TFA).
 			var ge *gigyaError
@@ -813,7 +813,7 @@ func (r *Renault) gigyaGetPersonID(session string) (string, error) {
 		return "", fmt.Errorf("gigya getAccountInfo decode: %w", err)
 	}
 	if result.ErrorCode != 0 || result.Data.PersonID == "" {
-		return "", fmt.Errorf("gigya getAccountInfo: no personId (code %d)", result.ErrorCode)
+		return "", fmt.Errorf("gigya getAccountInfo, no personId (code %d)", result.ErrorCode)
 	}
 
 	r.log.Debug("got person ID", "personId", result.Data.PersonID)
@@ -930,8 +930,8 @@ func (r *Renault) getBatteryStatus(vin string) (*BatteryStatus, error) {
 }
 
 // getSocLevel reads the car's charge limits from the newer Kamereon KCM
-// endpoint. The resource is spelled plural (ev/soc-levels) on current gateways —
-// the singular ev/soc-level 404s ("url does not exist") — so we try plural first
+// endpoint. The resource is spelled plural (ev/soc-levels) on current gateways:
+// the singular ev/soc-level 404s ("url does not exist"), so we try plural first
 // and fall back to the singular spelling on a 404, mirroring putSocLevel. Best
 // effort: unsupported on older (KCA-only) models (404/403), so the caller falls
 // back to the local Fallback Target SoC setting.
@@ -1008,12 +1008,12 @@ func parseSocLevel(body []byte) (*SocLevel, error) {
 // models; older cars return an error and the caller keeps the local fallback.
 //
 // The write is a POST to the (plural) ev/soc-levels resource with a bare
-// {"socMin":..,"socTarget":..} body — NOT a JSON:API data/attributes envelope.
+// {"socMin":..,"socTarget":..} body, NOT a JSON:API data/attributes envelope.
 // This matches hacf-fr/renault-api's set_battery_soc and real KCM owners'
 // captures; a successful write returns 200 {"type":"SOC_SYNCH",...}. We retry
 // the singular spelling if a VIN's gateway only routes ev/soc-level.
 func (r *Renault) SetSocTarget(target int) (err error) {
-	// Record the outcome under the renault source — it's a Renault API action, not
+	// Record the outcome under the renault source: it's a Renault API action, not
 	// a web action. One event per call (success or failure) via the named return.
 	defer func() {
 		if err != nil {
@@ -1053,7 +1053,7 @@ func (r *Renault) SetSocTarget(target int) (err error) {
 	}
 	// Refuse to write a fabricated minimum. The POST carries both fields, so an
 	// unknown (0) socMin would overwrite the car's real floor with 0. socMin is
-	// unknown when the soc-level GET has only ever been rate-limited (429) — the
+	// unknown when the soc-level GET has only ever been rate-limited (429): the
 	// user can retry once the quota recovers, or once a background poll reads it.
 	if !known || socMin <= 0 {
 		return fmt.Errorf("charge limit not changed: the car's minimum SoC isn't known yet " +
@@ -1092,7 +1092,7 @@ func (r *Renault) putSocLevel(vin string, socMin, socTarget int) error {
 
 	vin = strings.ToUpper(vin)
 
-	// Bare body — the KCM ev/soc-levels write is plain JSON, not a JSON:API
+	// Bare body: the KCM ev/soc-levels write is plain JSON, not a JSON:API
 	// data/attributes envelope. Both fields are mandatory.
 	body, _ := json.Marshal(map[string]int{
 		"socMin":    socMin,
@@ -1173,7 +1173,7 @@ func (r *Renault) getCockpitStatus(vin string) (*CockpitStatus, error) {
 		if result.Data.Attributes.TotalMileage > 0 {
 			return &result.Data.Attributes, nil
 		}
-		// Response decoded but has no mileage data — try next version
+		// Response decoded but has no mileage data: try next version
 	}
 
 	return nil, fmt.Errorf("cockpit unavailable on v1 and v2")

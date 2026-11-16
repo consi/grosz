@@ -33,10 +33,10 @@ export function GridStatus({ data }: Props) {
 
   if (!data || !data.phases?.length) {
     return (
-      <div className="card">
-        <h2>{t('grid.heading')}</h2>
-        <p className="muted">{t('grid.noData')}</p>
-      </div>
+      <section className="card grid-card">
+        <div className="card-head"><h2>{t('grid.heading')}</h2></div>
+        <p className="muted empty">{t('grid.noData')}</p>
+      </section>
     );
   }
 
@@ -57,13 +57,17 @@ export function GridStatus({ data }: Props) {
   ];
 
   return (
-    <div className="card">
-      <h2>{t('grid.heading')}</h2>
-      <div className="grid-total">
-        <div className={`grid-total-power ${importing ? 'importing' : 'exporting'}`}>
-          {Math.abs(data.totalPower).toFixed(0)} W
+    <section className="card grid-card">
+      <div className="card-head">
+        <h2>{t('grid.heading')}</h2>
+        <div className="card-aside">
+          <div className="grid-total num">
+            <span className={`grid-total-power ${importing ? 'importing' : 'exporting'}`}>
+              {Math.abs(data.totalPower).toFixed(0)} W
+            </span>
+            <span className="grid-freq">{data.frequency.toFixed(2)} Hz</span>
+          </div>
         </div>
-        <div className="grid-freq">{data.frequency.toFixed(2)} Hz</div>
       </div>
       <div className="grid-status">
         {data.phases.map((phase, i) => (
@@ -73,16 +77,15 @@ export function GridStatus({ data }: Props) {
               hoverIdx={hoverIdx}
               onHoverChange={setHoverIdx}
             />
-            <div className="grid-phase-content">
+            <div className="grid-phase-content num">
               <div className="grid-phase-title">{t('grid.phase', { n: i + 1 })}</div>
-              <div className="grid-value">{phaseValues[i].toFixed(0)} W</div>
-              <div className="grid-detail">{phase.voltage.toFixed(1)} V</div>
-              <div className="grid-detail">{phase.current.toFixed(2)} A</div>
+              <div className="grid-value">{(phaseValues[i] ?? 0).toFixed(0)} W</div>
+              <div className="grid-detail"><span>{phase.voltage.toFixed(1)} V</span> <span>{phase.current.toFixed(2)} A</span></div>
             </div>
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 

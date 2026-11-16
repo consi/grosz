@@ -49,7 +49,7 @@ func (s *Store) PurgeMeterReadings(maxAge time.Duration) error {
 
 // HourlyConsumption returns hourly consumption for the last `hours` hours.
 // Prefers Pstryk-sourced rows when present (long-term retention). Falls back
-// to aggregating the local meter_readings table when Pstryk has no data —
+// to aggregating the local meter_readings table when Pstryk has no data:
 // happens on fresh deploys, missing token, or repeated fetch failures.
 // Pstryk's API never reports the in-progress hour (even its is_live frames
 // only grow as hours finalize), so the current hour is derived from local
@@ -242,7 +242,7 @@ func (s *Store) PurgeChartMarkers(maxAge time.Duration) error {
 
 // MeterDeltaKWh returns energy consumed in [start, end), measured as the
 // max-min of the cumulative energy_wh column. Returns 0 when fewer than
-// two readings cover the window — the caller cannot tell consumption from
+// two readings cover the window: the caller cannot tell consumption from
 // no-data without that distinction, but for idle accounting "no rows" and
 // "no consumption" both yield 0.
 func (s *Store) MeterDeltaKWh(start, end time.Time) (float64, error) {
@@ -270,7 +270,7 @@ func (s *Store) MeterDeltaKWh(start, end time.Time) (float64, error) {
 
 // MeterReadingsCount returns the number of meter rows in [start, end). Used to
 // distinguish "we have data and it shows zero" from "no data exists for this
-// range" — the daily snapshot keeps the existing row in the latter case.
+// range": the daily snapshot keeps the existing row in the latter case.
 func (s *Store) MeterReadingsCount(start, end time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRow(

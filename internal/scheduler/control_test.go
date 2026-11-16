@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -97,6 +96,14 @@ func newTestScheduler(t *testing.T, mock *mockCharger) (*Scheduler, *store.Store
 	st := testStore(t)
 	_ = st.Set("zappi.charge_box_id", "CP001")
 	_ = st.Set("zappi.id_tag", "grosz")
+	// Planner defaults for tests: mid SoC, cheap fill off unless a test opts in.
+	_ = st.Set("scheduler.battery_capacity", "52")
+	_ = st.Set("scheduler.current_soc", "60")
+	_ = st.Set("scheduler.target_soc", "80")
+	_ = st.Set("scheduler.safe_soc", "50")
+	_ = st.Set("scheduler.min_soc", "15")
+	_ = st.Set("scheduler.cheap_fill_price", "0")
+	_ = st.Set("scheduler.departure_time", "07:00")
 
 	s := &Scheduler{
 		charger:  mock,
@@ -332,7 +339,10 @@ func TestControlCharging_Schedule_StopsOutsideWindow(t *testing.T) {
 
 	s.controlCharging()
 
-	assert.Equal(t, 1, mock.stops)
+	// A planned block still lies ahead: pause via the 0 W profile period
+	// instead of ending the transaction (Zappi would park in Finishing).
+	assert.Equal(t, 0, mock.stops)
+	assert.Equal(t, 1, mock.profiles)
 	assert.Equal(t, 0, mock.starts)
 }
 
@@ -401,15 +411,31 @@ func TestControlCharging_Schedule_NoScheduleNoStart(t *testing.T) {
 	assert.Equal(t, 0, mock.starts)
 }
 
-func TestControlCharging_Schedule_StopsWhenNoSchedule(t *testing.T) {
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+// Nothing planned but the car is not full: keep the transaction open and
+// hold it at 0 W (stopping would park Zappi in Finishing until re-plug).
+func TestControlCharging_Schedule_HoldsWhenNothingPlannedAndNotFull(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "SuspendedEVSE", txnID: 42}
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 	s.current = nil
 
 	s.controlCharging()
 
-	assert.Equal(t, 1, mock.stops, "should stop when schedule is nil")
+	assert.Equal(t, 0, mock.stops, "must not stop a plugged-in car below target")
+	assert.Equal(t, 1, mock.profiles, "hold profile written")
+	assert.True(t, s.profileInSync(nil))
+}
+
+func TestControlCharging_Schedule_StopsWhenTargetReached(t *testing.T) {
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	_ = st.Set("scheduler.current_soc", "80")
+	s.current = nil
+
+	s.controlCharging()
+
+	assert.Equal(t, 1, mock.stops)
 }
 
 func TestControlCharging_Schedule_WindowTransition(t *testing.T) {
@@ -435,12 +461,12 @@ func TestControlCharging_Schedule_WindowTransition(t *testing.T) {
 		}},
 	}
 
-	// Before window — no start
+	// Before window, no start
 	timeNow = func() time.Time { return windowStart.Add(-1 * time.Hour) }
 	s.controlCharging()
 	assert.Equal(t, 0, mock.starts, "before window: should not start")
 
-	// Window opens — starts
+	// Window opens: starts
 	timeNow = func() time.Time { return windowStart.Add(5 * time.Minute) }
 	s.controlCharging()
 	assert.Equal(t, 1, mock.starts, "window open: should start")
@@ -448,16 +474,22 @@ func TestControlCharging_Schedule_WindowTransition(t *testing.T) {
 	// Simulate transaction active
 	mock.setStatus("Charging", 1)
 
-	// Still in window — no duplicate start
+	// Still in window, no duplicate start
 	timeNow = func() time.Time { return windowStart.Add(1 * time.Hour) }
 	s.controlCharging()
-	assert.Equal(t, 1, mock.starts, "still in window: no duplicate")
-	assert.Equal(t, 0, mock.stops, "still in window: no stop")
+	assert.Equal(t, 1, mock.starts, "still in window, no duplicate")
+	assert.Equal(t, 0, mock.stops, "still in window, no stop")
 
-	// Window closes — stops
+	// Window closes below target: pause (hold), not stop.
 	timeNow = func() time.Time { return windowEnd.Add(5 * time.Minute) }
+	mock.setStatus("SuspendedEVSE", 1)
 	s.controlCharging()
-	assert.Equal(t, 1, mock.stops, "window closed: should stop")
+	assert.Equal(t, 0, mock.stops, "window closed below target: keep open")
+
+	// Target reached: now the session ends.
+	_ = st.Set("scheduler.current_soc", "80")
+	s.controlCharging()
+	assert.Equal(t, 1, mock.stops, "target reached: stop")
 }
 
 // --- Schedule Mode: SoC scenarios ---
@@ -468,9 +500,7 @@ func TestRecompute_SoCReached_NoSchedule(t *testing.T) {
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("scheduler.battery_capacity", "52")
 	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.skip_above_soc", "80")
 	_ = st.Set("scheduler.current_soc", "85")
-	_ = st.Set("scheduler.deadline_time", "07:00")
 
 	now := time.Now().Truncate(time.Hour)
 	rates := []tariff.Rate{{Start: now, End: now.Add(time.Hour), Price: 0.30}}
@@ -478,8 +508,8 @@ func TestRecompute_SoCReached_NoSchedule(t *testing.T) {
 
 	s.recompute()
 
-	assert.Nil(t, s.current, "schedule should be nil when SoC above skip threshold with only positive prices")
-	assert.Equal(t, "soc_above_threshold", s.skipReasonKey)
+	assert.Nil(t, s.current, "target reached and only positive prices, nothing to plan")
+	assert.Equal(t, "target_reached", s.skipReasonKey)
 }
 
 func TestRecompute_SoCAboveSkip_NegativePricesStillSchedule(t *testing.T) {
@@ -488,9 +518,8 @@ func TestRecompute_SoCAboveSkip_NegativePricesStillSchedule(t *testing.T) {
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("scheduler.battery_capacity", "52")
 	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.skip_above_soc", "70")
 	_ = st.Set("scheduler.current_soc", "75")
-	_ = st.Set("scheduler.deadline_time", "07:00")
+	_ = st.Set("scheduler.departure_time", "07:00")
 	_ = st.Set("charger.max_power", "11000")
 
 	now := time.Now().Truncate(time.Hour)
@@ -514,313 +543,6 @@ func TestRecompute_SoCAboveSkip_NegativePricesStillSchedule(t *testing.T) {
 // active slot when conditions (SoC, target reached, no affordable rates) would
 // otherwise tell us "skip charging". Charging caused the SoC rise; cancelling
 // the slot retroactively would issue a stop mid-session.
-
-func TestRecompute_PreservesActiveSlot_OnSoCSkip(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.skip_above_soc", "70")
-	_ = st.Set("scheduler.current_soc", "70")
-	_ = st.Set("scheduler.deadline_time", "07:00")
-
-	// In-progress slot whose period covers now.
-	activePeriod := SchedulePeriod{
-		Start: now.Add(-30 * time.Minute),
-		End:   now.Add(30 * time.Minute),
-		Power: 11000,
-		Price: 0.30,
-	}
-	s.current = &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:     now.Format("2006-01-02"),
-			Deadline: now.Add(time.Hour),
-			Periods:  []SchedulePeriod{activePeriod},
-			Cost:     3.30,
-			Energy:   11,
-		}},
-		Cost:     3.30,
-		Energy:   11,
-		Deadline: now.Add(time.Hour),
-	}
-
-	rates := []tariff.Rate{{Start: now, End: now.Add(time.Hour), Price: 0.30}}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	require.NotNil(t, s.current, "active slot must survive SoC-skip recompute")
-	require.Len(t, s.current.Slots, 1, "only the active slot should remain")
-	assert.Equal(t, now.Format("2006-01-02"), s.current.Slots[0].Date)
-	require.Len(t, s.current.Slots[0].Periods, 1)
-	assert.Equal(t, activePeriod, s.current.Slots[0].Periods[0],
-		"period must match the original in-progress one byte-for-byte")
-	assert.Empty(t, s.skipReasonKey, "skipReason must be cleared when schedule is preserved")
-	assert.Empty(t, s.skipReason)
-
-	// A subsequent controlCharging must not stop the active txn.
-	s.controlCharging()
-	mock.mu.Lock()
-	defer mock.mu.Unlock()
-	assert.Equal(t, 0, mock.stops, "preserved slot must keep IsChargeTime true → no stop issued")
-}
-
-func TestRecompute_PreservesActiveSlot_OnTargetReached(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.current_soc", "80") // target reached → TargetEnergy = 0
-	_ = st.Set("scheduler.deadline_time", "07:00")
-
-	activePeriod := SchedulePeriod{
-		Start: now.Add(-15 * time.Minute),
-		End:   now.Add(45 * time.Minute),
-		Power: 11000,
-		Price: 0.25,
-	}
-	s.current = &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:     now.Format("2006-01-02"),
-			Deadline: now.Add(time.Hour),
-			Periods:  []SchedulePeriod{activePeriod},
-			Cost:     2.75,
-			Energy:   11,
-		}},
-	}
-
-	rates := []tariff.Rate{{Start: now, End: now.Add(time.Hour), Price: 0.25}}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	require.NotNil(t, s.current, "active slot must survive target-reached recompute")
-	require.Len(t, s.current.Slots, 1)
-	require.Len(t, s.current.Slots[0].Periods, 1)
-	assert.Equal(t, activePeriod, s.current.Slots[0].Periods[0])
-	assert.Empty(t, s.skipReasonKey)
-}
-
-func TestRecompute_PreservesActiveSlot_OnNoAffordableRates(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.current_soc", "50")
-	_ = st.Set("scheduler.max_price", "0.10") // every rate filtered
-	_ = st.Set("scheduler.deadline_time", "07:00")
-	_ = st.Set("charger.max_power", "11000")
-
-	activePeriod := SchedulePeriod{
-		Start: now.Add(-10 * time.Minute),
-		End:   now.Add(50 * time.Minute),
-		Power: 11000,
-		Price: 0.05, // already-locked-in cheap period
-	}
-	s.current = &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:     now.Format("2006-01-02"),
-			Deadline: now.Add(time.Hour),
-			Periods:  []SchedulePeriod{activePeriod},
-			Cost:     0.55,
-			Energy:   11,
-		}},
-	}
-
-	// Every available rate is above max_price → ComputeSchedule returns nil.
-	rates := []tariff.Rate{
-		{Start: now, End: now.Add(time.Hour), Price: 0.50},
-		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.60},
-	}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	require.NotNil(t, s.current, "active slot must survive no-affordable-rates recompute")
-	require.Len(t, s.current.Slots, 1)
-	require.Len(t, s.current.Slots[0].Periods, 1)
-	assert.Equal(t, activePeriod, s.current.Slots[0].Periods[0])
-	assert.Empty(t, s.skipReasonKey)
-}
-
-func TestRecompute_HappyPath_MergesActiveSlot(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "10")
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
-
-	// prev: today's slot is in progress with a "locked-in" period.
-	todayDate := now.Format("2006-01-02")
-	activePeriod := SchedulePeriod{
-		Start: now.Add(-20 * time.Minute),
-		End:   now.Add(40 * time.Minute),
-		Power: 11000,
-		Price: 0.20,
-	}
-	s.current = &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:     todayDate,
-			Deadline: now.Add(time.Hour),
-			Periods:  []SchedulePeriod{activePeriod},
-			Cost:     2.20,
-			Energy:   11,
-		}},
-	}
-
-	// Rates that ComputeSchedule will favour — different from the active period.
-	rates := []tariff.Rate{
-		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Price: 0.10},
-		{Start: now.Add(3 * time.Hour), End: now.Add(4 * time.Hour), Price: 0.15},
-	}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	require.NotNil(t, s.current)
-
-	// Find today's slot in the merged schedule and assert its periods are the
-	// in-progress ones, not whatever ComputeSchedule produced.
-	var todaySlot *ScheduleSlot
-	for i, slot := range s.current.Slots {
-		if slot.Date == todayDate {
-			todaySlot = &s.current.Slots[i]
-			break
-		}
-	}
-	require.NotNil(t, todaySlot, "today's slot must be present in merged schedule")
-	require.Len(t, todaySlot.Periods, 1)
-	assert.Equal(t, activePeriod, todaySlot.Periods[0],
-		"today's slot must remain byte-for-byte the in-progress one")
-}
-
-func TestRecompute_HappyPath_NoActiveSlot_UsesNewScheduleAsIs(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "10")
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
-
-	// No prev schedule, no in-progress slot.
-	s.current = nil
-
-	rates := []tariff.Rate{
-		{Start: now, End: now.Add(time.Hour), Price: 0.30},
-		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.50},
-	}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	require.NotNil(t, s.current, "freshly computed schedule must replace nil prev")
-	require.NotEmpty(t, s.current.Slots)
-	// Slot should reflect ComputeSchedule's pick (the cheaper 0.30 rate).
-	assert.Equal(t, 0.30, s.current.Slots[0].Periods[0].Price)
-}
-
-func TestRecompute_DoesNotPreserveCancelledSlot(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.skip_above_soc", "70")
-	_ = st.Set("scheduler.current_soc", "75")
-	_ = st.Set("scheduler.deadline_time", "07:00")
-
-	// Slot covers now but is cancelled — must not be treated as in progress.
-	s.current = &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:      now.Format("2006-01-02"),
-			Cancelled: true,
-			Periods: []SchedulePeriod{{
-				Start: now.Add(-30 * time.Minute),
-				End:   now.Add(30 * time.Minute),
-				Power: 11000,
-			}},
-		}},
-	}
-
-	rates := []tariff.Rate{{Start: now, End: now.Add(time.Hour), Price: 0.30}}
-	s.tariff = &mockTariff{rates: rates}
-
-	s.recompute()
-
-	assert.Nil(t, s.current, "cancelled slot must not shield destructive recompute")
-	assert.Equal(t, "soc_above_threshold", s.skipReasonKey)
-}
-
-func TestRecompute_SoCBelowMin_IgnoresMaxPrice(t *testing.T) {
-	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.current_soc", "10")
-	_ = st.Set("scheduler.min_soc", "20")
-	_ = st.Set("scheduler.max_price", "0.10") // very low max price
-	_ = st.Set("scheduler.deadline_time", "07:00")
-	_ = st.Set("charger.max_power", "11000")
-
-	now := time.Now().Truncate(time.Hour)
-	deadline := now.Add(24 * time.Hour)
-	rates := make([]tariff.Rate, 24)
-	for i := 0; i < 24; i++ {
-		rates[i] = tariff.Rate{
-			Start: now.Add(time.Duration(i) * time.Hour),
-			End:   now.Add(time.Duration(i+1) * time.Hour),
-			Price: 0.50, // all above max_price
-		}
-	}
-	s.tariff = &mockTariff{rates: rates}
-
-	// Manually set config with SoC below min — MaxPrice should be zeroed
-	cfg := &Config{
-		TargetEnergy:    36.4, // (80-10)/100 * 52
-		Deadline:        deadline,
-		MaxPower:        11000,
-		BatteryCapacity: 52,
-		TargetSoC:       80,
-		CurrentSoC:      10,
-		MinSoC:          20,
-		MaxPrice:        0.10,
-	}
-	s.config = cfg
-	s.recompute()
-
-	assert.NotNil(t, s.current, "should compute schedule despite expensive rates when SoC below min")
-}
 
 // --- Mode Transition Scenarios ---
 
@@ -885,7 +607,8 @@ func TestControlCharging_ForceToSchedule_OutsideWindow(t *testing.T) {
 	}
 
 	s.controlCharging()
-	assert.Equal(t, 1, mock.stops, "schedule mode must stop outside window")
+	assert.Equal(t, 0, mock.stops, "future block ahead: pause via profile, don't stop")
+	assert.Equal(t, 1, mock.profiles)
 }
 
 func TestControlCharging_ForceToSchedule_InsideWindow(t *testing.T) {
@@ -1100,7 +823,7 @@ func TestControlCharging_PlugCheck_DoesNotBlockStop(t *testing.T) {
 
 // Stale Renault data must not block charging. Reflects the production race:
 // Zappi reports Preparing immediately on plug-in, but Renault polls every 15
-// minutes — between polls, plug_status="0" is leftover from before plug-in.
+// minutes: between polls, plug_status="0" is leftover from before plug-in.
 func TestControlCharging_PlugCheck_AllowsWhenStale(t *testing.T) {
 	now := time.Now()
 	origTimeNow := timeNow
@@ -1127,7 +850,7 @@ func TestControlCharging_PlugCheck_AllowsWhenTimestampMissing(t *testing.T) {
 	_ = st.Set("charger.mode", "force")
 	_ = st.Set("vehicle.require_plug_check", "true")
 	_ = st.Set("vehicle.plug_status", "0")
-	// No battery_timestamp set — empty string parses as error.
+	// No battery_timestamp set: empty string parses as error.
 
 	s.controlCharging()
 
@@ -1161,7 +884,7 @@ func TestControlCharging_PlugCheck_BlocksWhenFreshShortInterval(t *testing.T) {
 	_ = st.Set("vehicle.require_plug_check", "true")
 	_ = st.Set("vehicle.plug_status", "0")
 	_ = st.Set("vehicle.poll_interval", "5")
-	// 20min old — would exceed 2×5min=10min, but 30min floor applies.
+	// 20min old: would exceed 2×5min=10min, but 30min floor applies.
 	_ = st.Set("vehicle.battery_timestamp", now.Add(-20*time.Minute).UTC().Format(time.RFC3339))
 
 	s.controlCharging()
@@ -1185,7 +908,7 @@ func TestControlCharging_Schedule_NoopOnSuspendedEV(t *testing.T) {
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 
-	// Inside charge window — should still noop because car is done
+	// Inside charge window: should still noop because car is done
 	s.current = &Schedule{
 		Slots: []ScheduleSlot{{
 			Date: now.Format("2006-01-02"),
@@ -1225,7 +948,7 @@ func TestControlCharging_SuspendedEV_NoTxn_NoStart(t *testing.T) {
 	assert.Equal(t, 0, mock.starts, "car won't accept power in SuspendedEV")
 }
 
-// sendStop must not emit a "stop" chart marker any more — that's now the
+// sendStop must not emit a "stop" chart marker any more: that's now the
 // OCPP handler's job, fired off the actual StopTransaction so the marker
 // time matches the real stop time and we don't double-mark.
 func TestSendStop_DoesNotEmitChartMarker(t *testing.T) {
@@ -1240,11 +963,11 @@ func TestSendStop_DoesNotEmitChartMarker(t *testing.T) {
 	require.NoError(t, err)
 	for _, m := range markers {
 		assert.NotEqual(t, "stop", m.Type,
-			"scheduler must not emit stop marker — OCPP layer owns it")
+			"scheduler must not emit stop marker: OCPP layer owns it")
 	}
 }
 
-// sendStart still emits a "start" marker (out of scope for this PR — kept as
+// sendStart still emits a "start" marker (out of scope for this PR: kept as
 // a regression guard so we notice if someone changes it inadvertently).
 func TestSendStart_StillEmitsStartMarker(t *testing.T) {
 	mock := &mockCharger{connected: true, status: "Preparing", txnID: 0}
@@ -1279,7 +1002,7 @@ func TestOnModeChanged_OffToForce_StartsTxn(t *testing.T) {
 }
 
 // User explicitly forces charging in SuspendedEV state. Zappi may ignore
-// the RemoteStart, but the user's intent is honored — and the override is
+// the RemoteStart, but the user's intent is honored, and the override is
 // recorded in the system event for diagnostics.
 func TestOnModeChanged_BypassesSuspendedEV(t *testing.T) {
 	mock := &mockCharger{connected: true, status: "SuspendedEV", txnID: 0}
@@ -1342,7 +1065,7 @@ func TestOnModeChanged_OffToSchedule_StartsInWindow(t *testing.T) {
 	assert.Equal(t, 1, mock.starts)
 }
 
-// Schedule mode without an active window: OnModeChanged must not start —
+// Schedule mode without an active window: OnModeChanged must not start:
 // schedule mode still respects the schedule, even when explicitly switched.
 func TestOnModeChanged_ToSchedule_NoStartOutsideWindow(t *testing.T) {
 	now := time.Now()
@@ -1369,129 +1092,146 @@ func TestOnModeChanged_ToSchedule_NoStartOutsideWindow(t *testing.T) {
 	assert.Equal(t, 0, mock.starts, "schedule mode still respects window even on explicit switch")
 }
 
-// --- Fix 1: recompute freeze during active transaction ---
+// --- Recompute during an active transaction (replaces the old freeze) ---
 
-// While the charger reports an open transaction, recompute() must early-return
-// and leave s.current untouched. Without the freeze, a mid-charge SoC rise
-// across SkipAboveSoC truncates the planned future periods of the active slot
-// and the next hour boundary ends the charge short of TargetSoC.
-func TestRecompute_FrozenDuringActiveTransaction(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
+func withNow(t *testing.T, now time.Time) {
+	t.Helper()
+	orig := timeNow
 	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 99}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "85")
-	_ = st.Set("scheduler.skip_above_soc", "70")
-	_ = st.Set("scheduler.current_soc", "72") // would normally trigger SoC-skip
-
-	// Original schedule has the active period plus a planned future hour.
-	// A frozen recompute must keep BOTH; an unfrozen one would drop the
-	// future period when SoC-skip filters out all auto rates.
-	activePeriod := SchedulePeriod{
-		Start: now.Add(-15 * time.Minute),
-		End:   now.Add(45 * time.Minute),
-		Power: 11000,
-		Price: 0.30,
-	}
-	futurePeriod := SchedulePeriod{
-		Start: now.Add(45 * time.Minute),
-		End:   now.Add(1*time.Hour + 45*time.Minute),
-		Power: 11000,
-		Price: 0.32,
-	}
-	original := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:    now.Format("2006-01-02"),
-			Periods: []SchedulePeriod{activePeriod, futurePeriod},
-			Cost:    6.82,
-			Energy:  22,
-		}},
-		Cost:   6.82,
-		Energy: 22,
-	}
-	s.current = original
-	// Tariff returns only above-skip-threshold rates so the SoC-skip path would
-	// fire if recompute ran.
-	s.tariff = &mockTariff{rates: []tariff.Rate{
-		{Start: now.Add(45 * time.Minute), End: now.Add(1*time.Hour + 45*time.Minute), Price: 0.40},
-	}}
-
-	s.recompute()
-
-	require.NotNil(t, s.current, "frozen recompute must keep the existing schedule")
-	require.Same(t, original, s.current, "frozen recompute must NOT replace s.current")
-	require.Len(t, s.current.Slots, 1)
-	assert.Equal(t, []SchedulePeriod{activePeriod, futurePeriod}, s.current.Slots[0].Periods,
-		"planned future period must survive the freeze")
+	t.Cleanup(func() { timeNow = orig })
 }
 
-// First freeze emits a system event; subsequent recomputes for the same txnID
-// stay silent (no event spam every 15 minutes).
-func TestRecompute_FrozenEmitsEventOncePerSession(t *testing.T) {
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 100}
+// Regression 2026-11-15: a force window added during a running transaction
+// must reach the live plan immediately (the freeze ignored it and the
+// scheduler RemoteStopped the session inside the user's window).
+func TestRecompute_ForceOverrideAppliesDuringTransaction(t *testing.T) {
+	now := time.Now().Truncate(time.Minute)
+	withNow(t, now)
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 96}
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
+	_ = st.Set("charger.max_power", "10800")
+	_ = st.Set("scheduler.current_soc", "80")
+	_ = st.Set("scheduler.departure_time", now.Add(8*time.Hour).Format("15:04"))
+	s.tariff = &mockTariff{rates: []tariff.Rate{{Start: now.Add(-time.Hour), End: now.Add(5 * time.Hour), Price: 0.5}}}
 
-	s.recompute()
-	s.recompute()
-	s.recompute()
-
-	events, err := st.SystemEventsBySource("scheduler", 50, 0)
+	_, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindForce, Start: now, End: now.Add(3 * time.Hour), PowerW: 10800})
 	require.NoError(t, err)
-	frozen := 0
-	for _, e := range events {
-		if e.Action != "recompute" {
-			continue
-		}
-		raw, ok := e.Result.(json.RawMessage)
-		if !ok {
-			continue
-		}
-		var r map[string]any
-		if err := json.Unmarshal(raw, &r); err != nil {
-			continue
-		}
-		if v, _ := r["frozen"].(bool); v {
-			frozen++
-		}
-	}
-	assert.Equal(t, 1, frozen, "frozen event should fire only on the first freeze per session")
+
+	s.recompute()
+
+	require.NotNil(t, s.current)
+	withNow(t, now.Add(2*time.Hour))
+	assert.True(t, IsChargeTime(s.current), "force window must be in the live plan while charging")
+	s.controlCharging()
+	assert.Equal(t, 0, mock.stops, "must not stop inside the user's force window")
 }
 
-// After the transaction ends, the next recompute runs normally and the
-// freeze flag clears so the next session can emit its own first-freeze event.
-func TestRecompute_UnfreezesAfterTransactionEnds(t *testing.T) {
-	now := time.Now()
-	origTimeNow := timeNow
-	timeNow = func() time.Time { return now }
-	defer func() { timeNow = origTimeNow }()
-
-	mock := &mockCharger{connected: true, status: "Charging", txnID: 101}
+// A block window added mid-session cuts the preserved in-progress period.
+func TestRecompute_BlockOverrideCutsActivePeriod(t *testing.T) {
+	now := time.Now().Truncate(time.Minute)
+	withNow(t, now)
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 5}
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
-	_ = st.Set("scheduler.battery_capacity", "52")
-	_ = st.Set("scheduler.target_soc", "85")
-	_ = st.Set("scheduler.current_soc", "30")
-	_ = st.Set("scheduler.deadline_time", "07:00")
-	s.tariff = &mockTariff{rates: []tariff.Rate{
-		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.20},
-	}}
+	_ = st.Set("scheduler.current_soc", "72")
+	_ = st.Set("scheduler.departure_time", now.Add(8*time.Hour).Format("15:04"))
+	s.tariff = &mockTariff{}
+	s.current = &Schedule{Slots: []ScheduleSlot{{Date: "d", Periods: []SchedulePeriod{
+		{Start: now.Add(-10 * time.Minute), End: now.Add(50 * time.Minute), Power: 11000, Price: 0.3},
+	}}}}
+	_, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindBlock, Start: now.Add(-time.Minute), End: now.Add(time.Hour)})
+	require.NoError(t, err)
 
-	// Frozen: no schedule produced.
-	s.recompute()
-	require.Nil(t, s.current, "frozen recompute should not produce a schedule")
-	require.NotZero(t, s.recomputeFrozenTxnID)
-
-	// Transaction ends. Next recompute should run normally and clear the flag.
-	mock.setStatus("Preparing", 0)
 	s.recompute()
 
-	assert.Zero(t, s.recomputeFrozenTxnID, "frozen-txn flag must clear once transaction is gone")
+	assert.False(t, IsChargeTime(s.current), "block window must win over the in-progress period")
+}
+
+// --- Pausing between blocks (task: profiles instead of stop/start) ---
+
+func twoBlockPlan(now time.Time) *Schedule {
+	return &Schedule{Slots: []ScheduleSlot{{Date: "d", Periods: []SchedulePeriod{
+		{Start: now.Add(-2 * time.Hour), End: now.Add(-time.Hour), Power: 11000, Price: 0.3},
+		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000, Price: 0.3},
+	}}}}
+}
+
+func TestControl_GapWithFutureBlockPausesInsteadOfStopping(t *testing.T) {
+	now := time.Now()
+	withNow(t, now)
+	mock := &mockCharger{connected: true, status: "SuspendedEVSE", txnID: 7}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	s.current = twoBlockPlan(now)
+
+	s.controlCharging() // applies the profile, then pauses
+
+	assert.Equal(t, 1, mock.profiles, "plan profile written once")
+	assert.Equal(t, 0, mock.stops, "transaction kept open across the gap")
+	s.controlCharging()
+	assert.Equal(t, 1, mock.profiles, "no rewrite while in sync")
+	assert.Equal(t, 0, mock.stops)
+}
+
+func TestControl_GapStopsWhenProfileCannotBeWritten(t *testing.T) {
+	now := time.Now()
+	withNow(t, now)
+	fc := &failingCharger{mockCharger: mockCharger{connected: true, status: "Charging", txnID: 7}, failSet: true}
+	s, st := newTestScheduler(t, &fc.mockCharger)
+	s.charger = fc
+	_ = st.Set("charger.mode", "schedule")
+	s.current = twoBlockPlan(now)
+
+	s.controlCharging()
+
+	assert.Equal(t, 1, fc.stops, "without our profile on the charger, fall back to stopping")
+}
+
+func TestControl_StopsWhenNothingMorePlanned(t *testing.T) {
+	now := time.Now()
+	withNow(t, now)
+	mock := &mockCharger{connected: true, status: "Charging", txnID: 7}
+	s, st := newTestScheduler(t, mock)
+	_ = st.Set("charger.mode", "schedule")
+	s.current = &Schedule{Slots: []ScheduleSlot{{Date: "d", Periods: []SchedulePeriod{
+		{Start: now.Add(-2 * time.Hour), End: now.Add(-time.Hour), Power: 11000},
+	}}}}
+
+	_ = st.Set("scheduler.current_soc", "80")
+	s.controlCharging()
+
+	assert.Equal(t, 1, mock.stops)
+}
+
+func TestBuildPlanProfile_ZeroGapsAndLeadingZero(t *testing.T) {
+	now := time.Date(2026, 11, 16, 20, 30, 0, 0, time.UTC)
+	withNow(t, now)
+	sched := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{
+		{Start: now.Add(30 * time.Minute), End: now.Add(90 * time.Minute), Power: 10800},
+		{Start: now.Add(90 * time.Minute), End: now.Add(150 * time.Minute), Power: 10800},
+		{Start: now.Add(270 * time.Minute), End: now.Add(330 * time.Minute), Power: 10800},
+	}}}}
+	p := BuildPlanProfile(sched)
+	require.NotNil(t, p)
+	assert.Equal(t, now.Truncate(time.Hour), p.ChargingSchedule.StartSchedule.Time)
+	var got [][2]float64
+	for _, cp := range p.ChargingSchedule.ChargingSchedulePeriod {
+		got = append(got, [2]float64{float64(cp.StartPeriod), cp.Limit})
+	}
+	assert.Equal(t, [][2]float64{{0, 0}, {3600, 10800}, {3 * 3600, 0}, {5 * 3600, 10800}, {6 * 3600, 0}}, got)
+}
+
+// The plan hash must not change as time passes within the running block.
+func TestPlanHash_StableAcrossTime(t *testing.T) {
+	now := time.Now().Truncate(time.Hour).Add(10 * time.Minute)
+	sched := twoBlockPlan(now)
+	sched.Slots[0].Periods[0].End = now.Add(30 * time.Minute)
+	withNow(t, now)
+	h1 := planHash(sched)
+	withNow(t, now.Add(15*time.Minute))
+	h2 := planHash(sched)
+	assert.Equal(t, h1, h2)
 }
 
 // --- Fix 3: RequestModeChange debounce ---
@@ -1514,7 +1254,7 @@ func TestRequestModeChange_DoesNotApplyImmediately(t *testing.T) {
 	assert.False(t, applyAt.IsZero(), "applyAt must be populated")
 }
 
-// Multiple rapid RequestModeChange calls coalesce: only the LAST mode wins,
+// Multiple rapid RequestModeChange calls coalesce, only the LAST mode wins,
 // fired once, after modeChangeDebounce of silence from the last call.
 func TestRequestModeChange_CoalescesRapidClicks(t *testing.T) {
 	mock := &mockCharger{connected: true, status: "Charging", txnID: 42}
@@ -1523,9 +1263,9 @@ func TestRequestModeChange_CoalescesRapidClicks(t *testing.T) {
 
 	s.RequestModeChange("off")
 	s.RequestModeChange("force")
-	s.RequestModeChange("schedule") // back to current — still scheduled
+	s.RequestModeChange("schedule") // back to current: still scheduled
 
-	// All calls within the debounce window — nothing applied yet.
+	// All calls within the debounce window, nothing applied yet.
 	assert.Equal(t, "schedule", st.GetDefault("charger.mode", ""))
 	assert.Equal(t, 0, mock.starts)
 	assert.Equal(t, 0, mock.stops)
@@ -1581,31 +1321,32 @@ func TestRequestModeChange_AppliesLastMode(t *testing.T) {
 	assert.Equal(t, 1, mock.stops, "off mode applied must send RemoteStopTransaction for the active txn")
 }
 
-func TestWindowEditsDoNotInterruptActiveTransaction(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
+// Manual windows win over a running session (reverses the old "window edits
+// never touch an active transaction" rule, which let the scheduler ignore a
+// user's force window on 2026-11-15). Blocking the rest of the only planned
+// period ends the session; removing the block lets the plan resume.
+func TestBlockWindowOverRunningSessionIsHonoured(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	withNow(t, now)
 	mock := &mockCharger{connected: true, status: "Charging", txnID: 99}
 	s, st := newTestScheduler(t, mock)
 	require.NoError(t, st.Set("charger.mode", "schedule"))
-	original := &Schedule{Slots: []ScheduleSlot{{Date: now.Format("2006-01-02"), Periods: []SchedulePeriod{{Start: now.Add(-time.Hour), End: now.Add(time.Hour), Power: 11000}}}}}
-	s.current = original
-	require.True(t, s.HasActiveTransaction())
-	id, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindBlock, Start: now, End: now.Add(time.Hour)})
+	require.NoError(t, st.Set("scheduler.safe_soc", "70")) // must charge tonight
+	s.tariff = &mockTariff{rates: []tariff.Rate{
+		{Start: now.Add(-30 * time.Minute), End: now.Add(30 * time.Minute), Price: 0.3},
+		{Start: now.Add(30 * time.Minute), End: now.Add(90 * time.Minute), Price: 0.5},
+	}}
+	s.recompute()
+	require.True(t, IsChargeTime(s.current))
+
+	_, err := st.InsertOverride(store.ScheduleOverride{Kind: store.OverrideKindBlock, Start: now.Add(-time.Minute), End: now.Add(30 * time.Minute)})
 	require.NoError(t, err)
 	s.recompute()
 	s.controlCharging()
-	require.Same(t, original, s.current, "adding a block must not replace the running schedule")
-	_, err = st.SaveOverride(store.ScheduleOverride{ID: id, Kind: store.OverrideKindBlock, Start: now, End: now.Add(2 * time.Hour)}, nil)
-	require.NoError(t, err)
-	s.recompute()
-	s.controlCharging()
-	require.Same(t, original, s.current, "editing a block must not replace the running schedule")
-	require.NoError(t, st.DeleteOverride(id))
-	s.recompute()
-	s.controlCharging()
-	require.Same(t, original, s.current, "deleting a block must not replace the running schedule")
-	assert.Zero(t, mock.stops, "window mutations must never stop an active transaction")
-	assert.Zero(t, mock.clears)
-	assert.Zero(t, mock.profiles)
+
+	assert.False(t, IsChargeTime(s.current), "the block window wins over the running hour")
+	assert.Equal(t, 0, mock.stops, "more is planned later: pause via profile, don't stop")
+	assert.True(t, s.profileInSync(s.current))
 }
 
 func TestRemovingLastForceClearsFutureScheduleWithoutRates(t *testing.T) {

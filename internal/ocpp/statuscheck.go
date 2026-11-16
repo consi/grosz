@@ -21,7 +21,7 @@ var statusCheckIdleInterval = time.Minute
 // where Zappi (via the myenergi cloud proxy) silently drops a status update
 // after BootNotification or during long idle periods.
 //
-// The threshold doubles as the loop cadence — the check sleeps for
+// The threshold doubles as the loop cadence: the check sleeps for
 // `threshold` between scans, so the user-visible "Status Check Interval"
 // setting matches its name. A per-CP cooldown of the same duration prevents
 // trigger storms when Zappi stays silent.
@@ -105,7 +105,7 @@ func (c *StatusChecker) tick() {
 		if !cp.Connected {
 			continue
 		}
-		// One TriggerMessage per CP is enough — Zappi will report all
+		// One TriggerMessage per CP is enough: Zappi will report all
 		// connectors. Fire if any persisted connector for this CP is stale,
 		// or if no row exists yet at all.
 		anyStale := false
@@ -128,7 +128,7 @@ func (c *StatusChecker) tick() {
 		if !c.allowFire(cp.ID, now, threshold) {
 			continue
 		}
-		c.log.Info("triggering StatusNotification — stale or unknown state", "cpID", cp.ID)
+		c.log.Info("triggering StatusNotification: stale or unknown state", "cpID", cp.ID)
 		go c.fireTrigger(cp.ID)
 	}
 }

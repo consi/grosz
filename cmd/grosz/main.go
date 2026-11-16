@@ -56,15 +56,15 @@ var defaultSettings = map[string]string{
 	"tariff.pstryk_token":             "",
 	"abrp.token":                      "",
 	"scheduler.enabled":               "true",
-	"scheduler.target_energy":         "30",
-	"scheduler.deadline_time":         "07:00",
-	"scheduler.battery_capacity":      "0",
-	"scheduler.target_soc":            "0",
-	"scheduler.skip_above_soc":        "0",
-	"scheduler.min_soc":               "0",
+	"scheduler.departure_time":        "07:00",
+	"scheduler.battery_capacity":      "52",
+	"scheduler.target_soc":            "80",
+	"scheduler.safe_soc":              "50",
+	"scheduler.min_soc":               "15",
 	"scheduler.current_soc":           "0",
 	"scheduler.max_price":             "0",
-	"scheduler.charge_headroom":       "3",
+	"scheduler.cheap_fill_price":      "0.45",
+	"scheduler.cheap_fill_soc":        "100",
 	"vehicle.renault_user":            "",
 	"vehicle.renault_password":        "",
 	"vehicle.vin":                     "",
@@ -129,6 +129,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Settings of the previous (deadline-based) planner.
+	for _, k := range []string{"scheduler.target_energy", "scheduler.deadline_time",
+		"scheduler.skip_above_soc", "scheduler.charge_headroom"} {
+		_ = st.Delete(k)
+	}
+
 	// Configure log level from settings
 	switch st.GetDefault("log.level", "info") {
 	case "debug":
@@ -177,6 +183,7 @@ func main() {
 	var sched *scheduler.Scheduler
 	if st.GetBool("scheduler.enabled", true) {
 		sched = scheduler.New(&scheduler.ServerCharger{S: srv}, tp, st, log)
+		sched.SetCarLimiter(renaultPoller)
 		log.Info("scheduler started")
 	}
 
@@ -187,6 +194,12 @@ func main() {
 	// Wire up live SSE broadcasts
 	srv.SetStatusHook(func() {
 		webSrv.BroadcastStatus()
+	})
+	// Live OCPP message stream for the debug console.
+	srv.SetEventHook(func(e store.Event) {
+		if data, err := json.Marshal(e); err == nil {
+			webSrv.Broadcast("ocpp", string(data))
+		}
 	})
 	if sched != nil {
 		srv.SetSoCUpdater(sched.UpdateSoC)
@@ -249,6 +262,30 @@ func main() {
 		data, _ := json.Marshal(state)
 		webSrv.Broadcast("meter", string(data))
 	})
+
+	// Read the charger's smart-charging capabilities once per process start.
+	// Zappi does not re-send BootNotification when grosz restarts, so the
+	// boot-time Setup probe alone would leave them unknown after a deploy.
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-t.C:
+			}
+			cpID := st.GetDefault("zappi.charge_box_id", "")
+			if cpID == "" {
+				continue
+			}
+			if cp := srv.ChargePoint(cpID); cp == nil || !cp.IsConnected() {
+				continue
+			}
+			zappi.ProbeCapabilities(srv, cpID, st, log)
+			return
+		}
+	}()
 
 	go webSrv.Start(webPort)
 

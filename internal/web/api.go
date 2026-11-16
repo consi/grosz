@@ -120,45 +120,20 @@ func (s *Server) handleGetSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sched := s.scheduler.Schedule()
-	writeJSON(w, map[string]any{"schedule": sched})
+	writeJSON(w, map[string]any{"schedule": sched, "profile": s.scheduler.ProfileStatus()})
 }
 
+// handleSetSchedule resumes automatic planning (after a pause) and re-plans.
 func (s *Server) handleSetSchedule(w http.ResponseWriter, r *http.Request) {
 	if s.scheduler == nil {
 		http.Error(w, "scheduler not enabled", http.StatusServiceUnavailable)
 		return
 	}
-
-	deadlineStr := s.store.GetDefault("scheduler.deadline_time", "07:00")
-	now := time.Now()
-	var h, m int
-	if _, err := time.Parse("15:04", deadlineStr); err == nil {
-		h, _ = strconv.Atoi(deadlineStr[:2])
-		m, _ = strconv.Atoi(deadlineStr[3:5])
-	}
-	deadline := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
-	if deadline.Before(now) {
-		deadline = deadline.Add(24 * time.Hour)
-	}
-
-	cfg := scheduler.Config{
-		TargetEnergy:    s.store.GetFloat("scheduler.target_energy", 30),
-		Deadline:        deadline,
-		MaxPower:        s.store.GetFloat("charger.max_power", 11000),
-		MinPower:        s.store.GetFloat("charger.min_power", 1380),
-		BatteryCapacity: s.store.GetFloat("scheduler.battery_capacity", 0),
-		TargetSoC:       scheduler.EffectiveTargetSoC(s.store),
-		SkipAboveSoC:    s.store.GetFloat("scheduler.skip_above_soc", 0),
-		CurrentSoC:      s.store.GetFloat("scheduler.current_soc", 0),
-		MaxPrice:        s.store.GetFloat("scheduler.max_price", 0),
-		ChargeHeadroom:  s.store.GetFloat("scheduler.charge_headroom", 3),
-	}
 	if err := s.store.Set("scheduler.paused", "false"); err != nil {
 		s.internalError(w, "failed to resume scheduling", err)
 		return
 	}
-	s.scheduler.SetConfig(cfg)
-
+	s.scheduler.ReloadConfig()
 	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true, "schedule": s.scheduler.Schedule()})
 }
@@ -740,7 +715,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Charging Report %s — %s</title>
+<title>Charging Report %s: %s</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a2e; background: #f8f9fa; padding: 2rem; max-width: 900px; margin: 0 auto; }
@@ -764,7 +739,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 </head>
 <body>
 <h1>Charging Report</h1>
-<p class="subtitle">%s — %s</p>
+<p class="subtitle">%s: %s</p>
 `, fromDisplay, toDisplay, fromDisplay, toDisplay)
 
 	// Report summary grid
@@ -818,7 +793,7 @@ func (s *Server) handleSessionReportHTML(w http.ResponseWriter, r *http.Request)
 		_, _ = fmt.Fprint(w, "</table>\n")
 	}
 
-	_, _ = fmt.Fprintf(w, `<div class="footer">Generated %s — grosz EV Charging Manager</div>
+	_, _ = fmt.Fprintf(w, `<div class="footer">Generated %s: grosz EV Charging Manager</div>
 </body>
 </html>`, time.Now().Format("2006-01-02 15:04"))
 }

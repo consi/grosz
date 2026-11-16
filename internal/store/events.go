@@ -125,7 +125,7 @@ func (s *Store) LatestEnergyForTransaction(txnID int) (float64, time.Time, bool)
 			continue
 		}
 		if mv.TransactionID != txnID {
-			// payload LIKE matches loosely — verify the actual field.
+			// payload LIKE matches loosely: verify the actual field.
 			continue
 		}
 		kwh, mvTS, ok := extractEnergyKWh(mv.MeterValue, tsStr)

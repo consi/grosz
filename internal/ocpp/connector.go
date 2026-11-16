@@ -2,6 +2,7 @@ package ocpp
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +132,14 @@ func (c *Connector) StartTransaction(txnID int, idTag string) {
 	defer c.mu.Unlock()
 	c.TransactionID = txnID
 	c.IdTag = idTag
+	// The energy register is per transaction on Zappi (meterStart=0). Drop
+	// the previous transaction's reading so nothing can mistake it for this
+	// transaction's energy before the first MeterValues arrives.
+	for key := range c.Measurements {
+		if strings.HasPrefix(key, "Energy.Active.Import.Register") {
+			delete(c.Measurements, key)
+		}
+	}
 }
 
 // RestoreTransaction sets transaction fields without firing any side effects.

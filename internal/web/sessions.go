@@ -34,7 +34,7 @@ func (s *Server) createSession(username, userAgent string) (string, time.Time, e
 }
 
 // lookupSession returns (username, true) if the token is valid and unexpired.
-// On hit, opportunistically slides the expiry forward — but only if last_seen is older
+// On hit, opportunistically slides the expiry forward, but only if last_seen is older
 // than 5 minutes, to avoid hammering the DB on every authenticated request.
 func (s *Server) lookupSession(token string) (string, bool) {
 	if token == "" {

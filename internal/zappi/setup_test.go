@@ -51,7 +51,7 @@ func TestZappiSetupSequence(t *testing.T) {
 	tcp := testutil.NewTestChargePoint(t, url, "ZAPPI001")
 	time.Sleep(200 * time.Millisecond)
 
-	// Boot as Zappi — this triggers the setup hook
+	// Boot as Zappi: this triggers the setup hook
 	conf, err := tcp.SendBootNotification("Myenergi", "Zappi")
 	require.NoError(t, err)
 	assert.Equal(t, core.RegistrationStatusAccepted, conf.Status)

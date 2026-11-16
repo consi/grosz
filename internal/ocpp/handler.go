@@ -24,7 +24,7 @@ func (s *Server) OnBootNotification(chargePointId string, request *core.BootNoti
 
 	cp := s.ChargePoint(chargePointId)
 	if cp == nil {
-		// Should not happen — SetNewChargePointHandler runs before BootNotification
+		// Should not happen: SetNewChargePointHandler runs before BootNotification
 		s.mu.Lock()
 		cp = NewChargePoint(chargePointId)
 		s.points[chargePointId] = cp
@@ -89,7 +89,7 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 	}
 
 	// Diff against persisted state so chart markers only fire on real
-	// transitions — not on app restarts or websocket reconnects, which
+	// transitions, not on app restarts or websocket reconnects, which
 	// would otherwise cause Zappi to re-emit the current status.
 	newStatus := string(request.Status)
 	if s.store != nil && request.ConnectorId > 0 {
@@ -110,6 +110,9 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 				},
 				nil,
 			)
+			if fromStatus == "" || isPlugged(fromStatus) != isPlugged(newStatus) {
+				_ = s.store.RecordPlugTransition(ts, isPlugged(newStatus))
+			}
 			switch request.Status {
 			case core.ChargePointStatusPreparing:
 				_ = s.store.InsertChartMarker("plug", ts)
@@ -117,7 +120,7 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 				s.firePlugEventHook(chargePointId, request.ConnectorId, fromStatus, newStatus)
 			case core.ChargePointStatusAvailable:
 				// Don't emit "unplug" if we have no prior state (first ever
-				// notification after fresh DB) — we can't claim something was
+				// notification after fresh DB): we can't claim something was
 				// previously plugged.
 				if prev != nil && prev.Status != "" && prev.Status != string(core.ChargePointStatusAvailable) {
 					_ = s.store.InsertChartMarker("unplug", ts)
@@ -147,23 +150,32 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 		_ = s.store.UpsertConnectorState(cs)
 	}
 
-	// Zappi keeps the OCPP transaction open until unplug; on a full battery the
-	// EV reports SuspendedEV and never resumes. Without this, the session would
-	// stay status='active' in the DB and never appear in reports. Close it now
-	// using the latest meter reading. A later real StopTransaction is a no-op
-	// because StopSession's UPDATE is gated on status='active'.
-	//
-	// Generalized to every "no longer charging" state — vehicle pause, charger
-	// pause, finishing wind-down, fault — so the cost log always closes out
-	// and the chart always shows a stop marker. Available is excluded: it has
-	// its own "unplug" marker and OnStopTransaction handles the marker for it.
+	// Zappi keeps the OCPP transaction open until unplug; on a full battery
+	// the EV reports SuspendedEV and never resumes. Provisionally close the DB
+	// session so it shows up in reports, but only once the state has
+	// persisted (Zappi flashes SuspendedEV during the RCD check right after
+	// every start). SuspendedEVSE is deliberately excluded: that is the
+	// charger obeying a zero-power profile period, i.e. a planned pause
+	// inside one transaction. Finishing is excluded because StopTransaction
+	// follows within seconds and is authoritative anyway.
 	if isStopStatus(request.Status) {
-		s.finalizeSessionOnStop(chargePointId, request.ConnectorId, ts)
+		s.scheduleFinalize(chargePointId, request.ConnectorId, string(request.Status), ts)
 	}
 
 	s.fireStatusHook()
 	s.fireConnectorStatusHook(chargePointId, request.ConnectorId, string(request.Status))
 	return core.NewStatusNotificationConfirmation(), nil
+}
+
+// isPlugged reports whether a connector status means a car is connected.
+func isPlugged(status string) bool {
+	switch core.ChargePointStatus(status) {
+	case core.ChargePointStatusPreparing, core.ChargePointStatusCharging,
+		core.ChargePointStatusSuspendedEV, core.ChargePointStatusSuspendedEVSE,
+		core.ChargePointStatusFinishing:
+		return true
+	}
+	return false
 }
 
 // isStopStatus returns true for charge-point states that mean charging has
@@ -172,12 +184,32 @@ func (s *Server) OnStatusNotification(chargePointId string, request *core.Status
 func isStopStatus(status core.ChargePointStatus) bool {
 	switch status {
 	case core.ChargePointStatusSuspendedEV,
-		core.ChargePointStatusSuspendedEVSE,
-		core.ChargePointStatusFinishing,
 		core.ChargePointStatusFaulted:
 		return true
 	}
 	return false
+}
+
+// scheduleFinalize finalizes the session after finalizeDelay if the
+// connector is still in the same stop status with the same transaction.
+func (s *Server) scheduleFinalize(cpID string, connID int, status string, ts time.Time) {
+	if s.finalizeDelay <= 0 {
+		s.finalizeSessionOnStop(cpID, connID, ts)
+		return
+	}
+	cs, _ := s.store.GetConnectorState(cpID, connID)
+	if cs == nil || cs.TransactionID == 0 {
+		return
+	}
+	txn := cs.TransactionID
+	time.AfterFunc(s.finalizeDelay, func() {
+		cur, _ := s.store.GetConnectorState(cpID, connID)
+		if cur == nil || cur.TransactionID != txn || cur.Status != status {
+			s.log.Debug("finalize skipped: state changed", "txn", txn, "status", status)
+			return
+		}
+		s.finalizeSessionOnStop(cpID, connID, ts)
+	})
 }
 
 // finalizeSessionOnStop closes the DB session early when the connector reports
@@ -208,6 +240,9 @@ func (s *Server) finalizeSessionOnStop(cpID string, connID int, stopTime time.Ti
 		s.recordFinalizeWarn(cpID, cs.TransactionID, "nonpositive_energy")
 		return
 	}
+	if stopTime.Before(active.StartTime) {
+		stopTime = active.StartTime
+	}
 	cost := s.store.CalculateSessionCost(active.StartTime, stopTime, energy)
 	if err := s.store.StopSession(cs.TransactionID, stopTime, meterStopKWh, energy, cost); err != nil {
 		s.log.Warn("finalize on stop: stop session", "txn", cs.TransactionID, "err", err)
@@ -237,7 +272,7 @@ func (s *Server) currentEnergyKWh(cpID string, connID, txnID int) (float64, bool
 			if meas, ok := snap.Measurements["Energy.Active.Import.Register"]; ok {
 				return meas.Value / 1000.0, true
 			}
-			// Zappi reports the register with phase=N — the aggregator skips
+			// Zappi reports the register with phase=N: the aggregator skips
 			// it (only L1/L2/L3 sum to the base key), so fall back manually.
 			if meas, ok := snap.Measurements["Energy.Active.Import.Register.N"]; ok {
 				return meas.Value / 1000.0, true
@@ -411,23 +446,23 @@ func (s *Server) OnStopTransaction(chargePointId string, request *core.StopTrans
 		}
 		meterStopKWh := float64(request.MeterStop) / 1000.0
 
-		// Look up start meter to calculate energy and cost
-		active, _ := s.store.ActiveSession()
-		var energy, cost float64
-		if active != nil && active.TransactionID == request.TransactionId {
-			energy = meterStopKWh - active.MeterStart
-			cost = s.store.CalculateSessionCost(active.StartTime, stopTime, energy)
-		}
-		stopErr := s.store.StopSession(request.TransactionId, stopTime, meterStopKWh, energy, cost)
-		// Only emit the chart marker when this StopTransaction was the one that
-		// actually closed the session — if finalizeSessionOnStop ran first, the
-		// session is already 'completed' and we'd double-mark.
-		if stopErr == nil {
+		// StopTransaction carries the only meter reading guaranteed to
+		// belong to this transaction, so it always wins, including over a
+		// provisional finalize done earlier on SuspendedEV.
+		wasActive, energy, _, stopErr := s.store.CompleteSessionFromStop(
+			request.TransactionId, stopTime, meterStopKWh, s.store.CalculateSessionCost)
+		if stopErr == nil && wasActive {
 			_ = s.store.InsertChartMarker("stop", stopTime)
 		}
+		if stopErr == nil && !wasActive {
+			s.events.Info(events.ActionFinalizeSessionOnStop,
+				map[string]any{"txn": request.TransactionId, "cpID": chargePointId},
+				map[string]any{"corrected": true, "energy": energy},
+			)
+		}
 
-		// Update SoC estimate
-		if s.socUpdater != nil && energy > 0 {
+		// Update SoC estimate (only once per session)
+		if s.socUpdater != nil && energy > 0 && wasActive {
 			s.socUpdater(energy)
 		}
 	}

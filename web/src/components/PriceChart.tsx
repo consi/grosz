@@ -1,8 +1,9 @@
-import { useState, useRef, useCallback, useMemo } from 'react';
-import type { Rate, Schedule, HourlyEnergy } from '../types';
-import { useTranslation } from '../i18n';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
+import type { Rate, Schedule, HourlyEnergy, ScheduleOverride, PeriodReason } from '../types';
+import { useTranslation, type TranslationKey } from '../i18n';
 import { PeriodEditor } from './PeriodEditor';
-import type { ChargingWindow, SaveOverride } from '../utils/schedule';
+import { useMediaQuery } from '../hooks/useMediaQuery';
+import { covers, minuteNow, overlaps, type ChargingWindow, type SaveOverride, type DeleteOverride, type OverridePayload } from '../utils/schedule';
 
 export interface ChartMarker {
   time: string; // ISO timestamp
@@ -15,9 +16,21 @@ interface Props {
   consumption?: HourlyEnergy[];
   markers?: ChartMarker[];
   timezone: string;
+  overrides: ScheduleOverride[];
   onCreateOverride: SaveOverride;
+  onDeleteOverride: DeleteOverride;
   sessionActive: boolean;
 }
+
+const REASON_KEYS: Record<PeriodReason, TranslationKey> = {
+  needed: 'schedule.reason.needed',
+  cheapest: 'schedule.reason.cheapest',
+  trip: 'schedule.reason.trip',
+  floor: 'schedule.reason.floor',
+  negative: 'schedule.reason.negative',
+  cheapFill: 'schedule.reason.cheapFill',
+  manual: 'schedule.manual',
+};
 
 function formatEnergy(wh: number): string {
   if (wh >= 1000) return `${(wh / 1000).toFixed(2)} kWh`;
@@ -100,8 +113,12 @@ function storedPercentiles(): { lower: number; upper: number } {
     : { lower: DEFAULT_LOWER_PERCENTILE, upper: DEFAULT_UPPER_PERCENTILE };
 }
 
-export function PriceChart({ rates, schedule, consumption, markers, timezone, onCreateOverride, sessionActive }: Props) {
+export function PriceChart({ rates, schedule, consumption, markers, timezone, overrides, onCreateOverride, onDeleteOverride, sessionActive }: Props) {
   const [scheduling, setScheduling] = useState<ChargingWindow | null>(null);
+  // Hour picked by a tap/click: shows details and override actions for it.
+  const [selected, setSelected] = useState<{ start: string; end: string; x: number } | null>(null);
+  const [hourBusy, setHourBusy] = useState(false);
+  const [hourError, setHourError] = useState('');
   const { t, locale } = useTranslation();
   const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
   const [zoom, setZoom] = useState<{ startMs: number; endMs: number } | null>(null);
@@ -112,8 +129,24 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
   const pointerDownXRef = useRef<number | null>(null);
   const lastTapRef = useRef<number>(0);
   const draggingRef = useRef<boolean>(false);
+  const compact = useMediaQuery('(max-width: 699.98px)');
   const [{ lower: lowerPercentile, upper: upperPercentile }, setPercentiles] =
     useState(storedPercentiles);
+
+  // Close the hour popover on Escape or a tap/click outside the chart.
+  useEffect(() => {
+    if (!selected) return;
+    const onDown = (e: PointerEvent) => {
+      if (chartRef.current && !chartRef.current.contains(e.target as Node)) setSelected(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelected(null); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [selected]);
 
   const setChartRef = useCallback((node: HTMLDivElement | null) => {
     chartRef.current = node;
@@ -142,10 +175,10 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
 
   if (!rates?.length) {
     return (
-      <div className="card">
-        <h2>{t('price.heading')}</h2>
-        <p className="muted">{t('price.noData')}</p>
-      </div>
+      <section className="card price-card">
+        <div className="card-head"><h2>{t('price.heading')}</h2></div>
+        <p className="muted empty">{t('price.noData')}</p>
+      </section>
     );
   }
 
@@ -170,7 +203,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
 
   // Collect scheduled periods from all active (non-cancelled) slots as
   // [startMs, endMs) intervals, so a tariff hour is "scheduled" if any
-  // period overlaps it — including sub-hour custom force overrides.
+  // period overlaps it (including sub-hour custom force overrides).
   const scheduledRanges: { start: number; end: number }[] =
     schedule?.slots
       ?.filter((s) => !s.cancelled)
@@ -205,7 +238,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
   const barCount = viewRates.length;
   const chartHeight = 360;
 
-  // Build consumption line — only connect points that have data
+  // Build consumption line: only connect points that have data
   const consumptionPoints: { x: number; y: number; wh: number }[] = [];
   if (hasConsumption) {
     viewRates.forEach((r, i) => {
@@ -220,7 +253,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
     });
   }
 
-  // Schedule background ranges — group consecutive scheduled tariff hours.
+  // Schedule background ranges: group consecutive scheduled tariff hours.
   const scheduleRanges: { startIdx: number; endIdx: number }[] = [];
   if (scheduledRanges.length > 0) {
     let rangeStart = -1;
@@ -279,6 +312,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
       if (zoom && now - lastTapRef.current < DOUBLE_TAP_MS) {
         setZoom(null);
         setHover(null);
+        setSelected(null);
         pointerDownXRef.current = null;
         lastTapRef.current = 0;
         return;
@@ -337,6 +371,15 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
           setZoom({ startMs, endMs });
         }
       }
+    } else if (startX != null && (e.pointerType !== 'mouse' || e.button === 0)) {
+      // A tap or click (no drag) selects the hour for the override popover.
+      const rect = e.currentTarget.getBoundingClientRect();
+      if (rect.width > 0 && barCount > 0) {
+        const x = e.clientX - rect.left;
+        const rate = viewRates[idxAtX(x, rect)];
+        setSelected({ start: rate.start, end: rate.end, x });
+        setHourError('');
+      }
     }
     setDrag(null);
   };
@@ -352,22 +395,69 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
     e.preventDefault();
     setZoom(null);
     setHover(null);
+    setSelected(null);
   };
 
   const handlePointerLeave = (e: React.PointerEvent<HTMLDivElement>) => {
     if (draggingRef.current) return;
-    // On touch, leave fires when the finger lifts — keep the tooltip pinned
+    // On touch, leave fires when the finger lifts: keep the tooltip pinned
     // so a tap shows details until the next interaction.
     if (e.pointerType === 'mouse') setHover(null);
   };
 
+  // Override popover for the selected hour.
+  const selectedRate = selected ? viewRates.find((r) => r.start === selected.start) : undefined;
+  const selectedWindow: ChargingWindow | null = selectedRate
+    ? { start: selectedRate.start, end: selectedRate.end } : null;
+  const selectedOverrides = selectedWindow ? overrides.filter((o) => overlaps(o, selectedWindow)) : [];
+  const selectedPeriod = selectedWindow
+    ? schedule?.slots?.filter((s) => !s.cancelled).flatMap((s) => s.periods || [])
+      .find((p) => p.power > 0 && overlaps(p, selectedWindow))
+    : undefined;
+  const selectedPast = selectedWindow ? Date.parse(selectedWindow.end) <= now.getTime() : false;
+  const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: timezone });
+  const runHourAction = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
+    setHourBusy(true);
+    setHourError('');
+    try {
+      const result = await action();
+      if (result.ok) setSelected(null);
+      else setHourError(result.error || t('schedule.overrideError'));
+    } catch { setHourError(t('schedule.overrideError')); }
+    finally { setHourBusy(false); }
+  };
+  const overrideHour = (kind: OverridePayload['kind']) => {
+    if (!selectedWindow) return;
+    // An hour already in progress starts now; the backend rejects past windows.
+    const start = Math.max(Date.parse(selectedWindow.start), minuteNow());
+    void runHourAction(() => onCreateOverride({ kind, start: new Date(start).toISOString(), end: selectedWindow.end }));
+  };
+  const stopPopoverPointer = (e: React.SyntheticEvent) => e.stopPropagation();
+
+  const legend = (
+    <div className="chart-legend">
+      <span className="legend-item"><span className="legend-swatch schedule-swatch" /> {t('price.scheduled')}</span>
+      <span className="legend-item"><span className="legend-swatch usage-swatch" /> {t('price.usage')}</span>
+      <span className="legend-item"><span className="legend-swatch start-swatch" /> {t('price.chargeStart')}</span>
+      <span className="legend-item"><span className="legend-swatch stop-swatch" /> {t('price.chargeStop')}</span>
+      <span className="legend-item"><span className="legend-swatch plug-swatch" /> {t('price.pluggedIn')}</span>
+      <span className="legend-item"><span className="legend-swatch unplug-swatch" /> {t('price.unplugged')}</span>
+    </div>
+  );
+
   return (
-    <div className="card">
-      <div className="chart-heading">
+    <section className="card price-card">
+      <div className="card-head chart-heading">
         <h2>{t('price.heading')}</h2>
+        <div className="price-stats num">
+          <span>{t('price.min', { value: minPrice.toFixed(3) })}</span>
+          <span>{t('price.avg', { value: avgPrice.toFixed(3) })}</span>
+          <span>{t('price.max', { value: maxPrice.toFixed(3) })}</span>
+          <span className="muted">PLN/kWh</span>
+        </div>
         <div className="chart-actions">
-          {zoom && <button className="icon-btn" title={t('price.resetZoom')} aria-label={t('price.resetZoom')} onClick={() => { setZoom(null); setHover(null); }}>↺</button>}
-          <button className="chart-schedule-btn" title={t('price.scheduleVisible')} aria-label={t('price.scheduleVisible')}
+          {zoom && <button type="button" className="chart-icon-btn" title={t('price.resetZoom')} aria-label={t('price.resetZoom')} onClick={() => { setZoom(null); setHover(null); }}>↺</button>}
+          <button type="button" className="chart-icon-btn chart-schedule-btn" title={t('price.scheduleVisible')} aria-label={t('price.scheduleVisible')}
             disabled={Date.parse(viewRates[viewRates.length - 1].end) <= now.getTime()}
             onClick={() => setScheduling({
               start: new Date(Math.max(Date.now(), Date.parse(viewRates[0].start))).toISOString(),
@@ -386,13 +476,6 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
           return result;
         }} />
       </div>}
-      <div className="price-stats">
-        <span>{t('price.min', { value: minPrice.toFixed(3) })}</span>
-        <span>{t('price.avg', { value: avgPrice.toFixed(3) })}</span>
-        <span>{t('price.max', { value: maxPrice.toFixed(3) })}</span>
-        <span className="muted">PLN/kWh</span>
-      </div>
-
       <div className="chart-wrapper">
         <div className={`y-axis y-axis-left${hasNegative ? ' y-axis-neg' : ''}`}>
           {hasNegative ? (
@@ -508,7 +591,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
           )}
 
           {/* Hover tooltip */}
-          {hover !== null && hoverRate && hoverStart && !drag && (
+          {hover !== null && hoverRate && hoverStart && !drag && !selected && (
             <div
               className="chart-tooltip"
               style={{
@@ -541,6 +624,53 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
               )}
             </div>
           )}
+
+          {selected && selectedRate && selectedWindow && !drag && (
+            <div
+              className="chart-hour-popover"
+              role="dialog"
+              aria-label={t('price.hourActions')}
+              style={selected.x < chartWidth / 2
+                ? { left: Math.max(0, Math.min(selected.x + 8, chartWidth - 236)) }
+                : { right: Math.max(0, Math.min(chartWidth - selected.x + 8, chartWidth - 236)) }}
+              onPointerDown={stopPopoverPointer}
+              onPointerMove={stopPopoverPointer}
+              onPointerUp={stopPopoverPointer}
+              onContextMenu={stopPopoverPointer}
+            >
+              <div className="hour-popover-head">
+                <div>
+                  <div className="tooltip-time">
+                    {new Date(selectedRate.start).toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: timezone })}{' '}
+                    {fmtTime(selectedRate.start)}–{fmtTime(selectedRate.end)}
+                  </div>
+                  <div className="tooltip-price">{selectedRate.price.toFixed(3)} PLN/kWh</div>
+                </div>
+                <button type="button" className="hour-popover-close" aria-label={t('common.close')} title={t('common.close')} onClick={() => setSelected(null)}>×</button>
+              </div>
+              {selectedPeriod && (
+                <div className="tooltip-scheduled">
+                  {t('price.scheduled')}
+                  {selectedPeriod.reason && <> · {t(REASON_KEYS[selectedPeriod.reason], { soc: Math.round(selectedPeriod.fillSoc ?? 0) })}</>}
+                </div>
+              )}
+              {selectedPast ? <p className="muted hour-popover-note">{t('price.pastHour')}</p> : (
+                <div className="hour-popover-actions">
+                  <button type="button" className="btn-sm primary" disabled={hourBusy || selectedOverrides.some((o) => o.kind === 'force' && covers(o, selectedWindow))}
+                    onClick={() => overrideHour('force')}>{t('price.forceHour')}</button>
+                  <button type="button" className="btn-sm" disabled={hourBusy || selectedOverrides.some((o) => o.kind === 'block' && covers(o, selectedWindow))}
+                    onClick={() => overrideHour('block')}>{t('price.blockHour')}</button>
+                  {selectedOverrides.map((o) => (
+                    <button type="button" key={o.id} className="btn-sm danger" disabled={hourBusy}
+                      onClick={() => void runHourAction(() => onDeleteOverride(o.id))}>
+                      {t(o.kind === 'force' ? 'price.removeForce' : 'price.removeBlock', { range: `${fmtTime(o.start)}–${fmtTime(o.end)}` })}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {hourError && <div className="custom-period-error" role="alert">{hourError}</div>}
+            </div>
+          )}
         </div>
 
         {hasConsumption && (
@@ -568,7 +698,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
             max="100"
             step="0.5"
             value={lowerPercentile}
-            aria-label="Green bound percentile"
+            aria-label={t('price.percentileLower')}
             aria-valuemax={upperPercentile - 0.5}
             aria-valuetext={`${lowerPercentile}%`}
             onChange={(e) => {
@@ -584,7 +714,7 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
             max="100"
             step="0.5"
             value={upperPercentile}
-            aria-label="Red bound percentile"
+            aria-label={t('price.percentileUpper')}
             aria-valuemin={lowerPercentile + 0.5}
             aria-valuetext={`${upperPercentile}%`}
             onChange={(e) => {
@@ -595,21 +725,13 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
           />
           <span
             className="percentile-value percentile-value-lower"
-            style={{
-              '--vertical-position': `${38 + lowerPercentile * 2.84}px`,
-              '--horizontal-position': `${lowerPercentile}%`,
-              '--horizontal-offset': `${38 - lowerPercentile * 0.76}px`,
-            } as React.CSSProperties}
+            style={{ '--p': lowerPercentile } as React.CSSProperties}
           >
             {lowerPercentile}%
           </span>
           <span
             className="percentile-value percentile-value-upper"
-            style={{
-              '--vertical-position': `${38 + upperPercentile * 2.84}px`,
-              '--horizontal-position': `${upperPercentile}%`,
-              '--horizontal-offset': `${38 - upperPercentile * 0.76}px`,
-            } as React.CSSProperties}
+            style={{ '--p': upperPercentile } as React.CSSProperties}
           >
             {upperPercentile}%
           </span>
@@ -620,10 +742,14 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
       {(() => {
         const minLabelWidth = 22;
         const labelStep = chartWidth > 0 ? Math.max(1, Math.ceil((barCount * minLabelWidth) / chartWidth)) : 1;
+        const dateIdxs = xLabels.filter((l) => l.date).map((l) => l.idx);
         return (
           <div className={`x-axis ${hasConsumption ? 'with-consumption' : ''}`}>
             {xLabels.map((l) => {
-              const show = l.date || l.idx % labelStep === 0;
+              // Day-boundary labels always show; skip regular hour labels
+              // that would collide with a nearby date label.
+              const show = l.date || (l.idx % labelStep === 0 &&
+                !dateIdxs.some((d) => d !== l.idx && Math.abs(d - l.idx) < labelStep));
               return (
                 <div key={l.idx} className="x-label">
                   <span style={{ visibility: show ? 'visible' : 'hidden' }}>{l.hour}</span>
@@ -635,15 +761,13 @@ export function PriceChart({ rates, schedule, consumption, markers, timezone, on
         );
       })()}
 
-      {/* Legend */}
-      <div className="chart-legend">
-        <span className="legend-item"><span className="legend-swatch schedule-swatch" /> {t('price.scheduled')}</span>
-        <span className="legend-item"><span className="legend-swatch usage-swatch" /> {t('price.usage')}</span>
-        <span className="legend-item"><span className="legend-swatch start-swatch" /> {t('price.chargeStart')}</span>
-        <span className="legend-item"><span className="legend-swatch stop-swatch" /> {t('price.chargeStop')}</span>
-        <span className="legend-item"><span className="legend-swatch plug-swatch" /> {t('price.pluggedIn')}</span>
-        <span className="legend-item"><span className="legend-swatch unplug-swatch" /> {t('price.unplugged')}</span>
-      </div>
-    </div>
+      {/* Legend: always visible on wide screens, tucked away on phones */}
+      {compact ? (
+        <details className="chart-legend-details">
+          <summary>{t('price.legend')}</summary>
+          {legend}
+        </details>
+      ) : legend}
+    </section>
   );
 }

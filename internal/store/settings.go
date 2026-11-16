@@ -118,18 +118,24 @@ func (s *Store) SetMany(kv map[string]string) error {
 	return tx.Commit()
 }
 
-// SeedDefaults inserts default settings only if the settings table is empty.
+// SeedDefaults inserts every default whose key is missing; existing values
+// are never overwritten. On a fresh install this seeds everything; on an
+// upgrade it adds settings introduced by the new version.
 func (s *Store) SeedDefaults(defaults map[string]string) error {
-	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count); err != nil {
-		return fmt.Errorf("count settings: %w", err)
+	added := 0
+	for k, v := range defaults {
+		res, err := s.db.Exec(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`, k, v)
+		if err != nil {
+			return fmt.Errorf("seed setting %q: %w", k, err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
 	}
-	if count > 0 {
-		return nil
+	if added > 0 {
+		s.log.Info("seeded default settings", "added", added)
 	}
-
-	s.log.Info("seeding default settings", "count", len(defaults))
-	return s.SetMany(defaults)
+	return nil
 }
 
 // HasSettings returns true if the settings table has any entries.

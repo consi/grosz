@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -191,4 +192,42 @@ func TestAPI_ChargerMaintenanceMode_InvalidJSON(t *testing.T) {
 	web.handleChargerMaintenanceMode(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAPI_OCPPConsole_RoundTrip(t *testing.T) {
+	web, _, srv := newAPITestServer(t)
+	var live []string
+	srv.SetEventHook(func(e store.Event) { live = append(live, e.Direction+":"+e.Action) })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/charger/CP_API/ocpp",
+		bytes.NewBufferString(`{"action":"ChangeConfiguration","payload":{"key":"MaintenanceMode","value":"True"}}`))
+	req.SetPathValue("id", "CP_API")
+	w := httptest.NewRecorder()
+	web.handleOCPPConsoleSend(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var res struct {
+		Response map[string]any `json:"response"`
+		Error    string         `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &res))
+	assert.Empty(t, res.Error)
+	assert.Equal(t, "Accepted", res.Response["status"])
+	assert.Contains(t, live, "send:ChangeConfiguration")
+	assert.Contains(t, live, "recv:ChangeConfiguration")
+
+	// The request really reached the (simulated) charger.
+	cfg, err := srv.GetConfiguration("CP_API", []string{"MaintenanceMode"})
+	require.NoError(t, err)
+	assert.Equal(t, "True", cfg["MaintenanceMode"])
+}
+
+func TestAPI_OCPPConsole_ValidationError(t *testing.T) {
+	web, _, _ := newAPITestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/charger/CP_API/ocpp",
+		bytes.NewBufferString(`{"action":"Reset","payload":{"type":"Sometimes"}}`))
+	req.SetPathValue("id", "CP_API")
+	w := httptest.NewRecorder()
+	web.handleOCPPConsoleSend(w, req)
+	assert.Contains(t, w.Body.String(), "error")
 }

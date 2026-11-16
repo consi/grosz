@@ -78,7 +78,7 @@ func (s *Store) PstrykHourlyConsumption(hours int) ([]HourlyEnergy, error) {
 }
 
 // LatestPstrykHour returns the most recent stored hour. ok=false when the
-// table is empty — caller uses this to decide between bootstrap and gap-fill.
+// table is empty: caller uses this to decide between bootstrap and gap-fill.
 func (s *Store) LatestPstrykHour() (time.Time, bool) {
 	return s.pstrykHourEdge("DESC")
 }

@@ -9,251 +9,85 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBuildProfile(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-
-	sched := &Schedule{
-		Slots: []ScheduleSlot{
-			{
-				Date:     "2026-01-01",
-				Deadline: now.Add(4 * time.Hour),
-				Periods: []SchedulePeriod{
-					{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30},
-					{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000, Price: 0.50},
-				},
-				Cost:   8.80,
-				Energy: 22,
-			},
-		},
-		Cost:     8.80,
-		Energy:   22,
-		Deadline: now.Add(4 * time.Hour),
+func planPeriods(t *testing.T, sched *Schedule) [][2]float64 {
+	t.Helper()
+	p := BuildPlanProfile(sched)
+	require.NotNil(t, p)
+	assert.Equal(t, types.ChargingProfilePurposeTxDefaultProfile, p.ChargingProfilePurpose)
+	assert.Equal(t, types.ChargingRateUnitWatts, p.ChargingSchedule.ChargingRateUnit)
+	var out [][2]float64
+	for _, cp := range p.ChargingSchedule.ChargingSchedulePeriod {
+		out = append(out, [2]float64{float64(cp.StartPeriod), cp.Limit})
 	}
-
-	profile := BuildProfile(sched, 11000)
-	require.NotNil(t, profile)
-
-	assert.Equal(t, types.ChargingProfilePurposeTxDefaultProfile, profile.ChargingProfilePurpose)
-	assert.Equal(t, types.ChargingProfileKindAbsolute, profile.ChargingProfileKind)
-	assert.Equal(t, types.ChargingRateUnitWatts, profile.ChargingSchedule.ChargingRateUnit)
-
-	periods := profile.ChargingSchedule.ChargingSchedulePeriod
-	require.GreaterOrEqual(t, len(periods), 3)
-
-	// First period: charge at 11kW
-	assert.Equal(t, 0, periods[0].StartPeriod)
-	assert.Equal(t, float64(11000), periods[0].Limit)
-
-	// Second period: gap (0W)
-	assert.Equal(t, 3600, periods[1].StartPeriod) // 1 hour in
-	assert.Equal(t, float64(0), periods[1].Limit)
-
-	// Third period: charge again at 11kW
-	assert.Equal(t, 7200, periods[2].StartPeriod) // 2 hours in
-	assert.Equal(t, float64(11000), periods[2].Limit)
+	return out
 }
 
-func TestBuildProfileNil(t *testing.T) {
-	assert.Nil(t, BuildProfile(nil, 11000))
-	assert.Nil(t, BuildProfile(&Schedule{}, 11000))
+func TestBuildPlanProfileNil(t *testing.T) {
+	assert.Nil(t, BuildPlanProfile(nil))
+	assert.Nil(t, BuildPlanProfile(&Schedule{}))
 }
 
-// Hourly periods with same power and no gap should consolidate into a
-// single OCPP period — the charger sees one continuous block. The user-
-// facing hourly granularity is preserved separately in the Schedule data
-// model.
-func TestBuildProfileConsolidatesAdjacentSamePower(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	sched := &Schedule{
-		Slots: []ScheduleSlot{
-			{
-				Date: "2026-01-01",
-				Periods: []SchedulePeriod{
-					{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30},
-					{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000, Price: 0.40},
-					{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000, Price: 0.50},
-				},
-			},
-		},
-	}
-
-	profile := BuildProfile(sched, 11000)
-	require.NotNil(t, profile)
-
-	periods := profile.ChargingSchedule.ChargingSchedulePeriod
-	require.Len(t, periods, 2, "three adjacent same-power hours should produce one charge period + one zero closer")
-
-	assert.Equal(t, 0, periods[0].StartPeriod)
-	assert.Equal(t, float64(11000), periods[0].Limit)
-	assert.Equal(t, 3*3600, periods[1].StartPeriod, "zero closer at 3h (true end of block)")
-	assert.Equal(t, float64(0), periods[1].Limit)
+func TestBuildPlanProfileConsolidatesAdjacentSamePower(t *testing.T) {
+	now := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	withNow(t, now)
+	sched := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{
+		{Start: now, End: now.Add(time.Hour), Power: 11000},
+		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000},
+		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
+	}}}}
+	assert.Equal(t, [][2]float64{{0, 11000}, {3 * 3600, 0}}, planPeriods(t, sched))
 }
 
-// Adjacent periods with different power must NOT be consolidated — the
-// charger needs to see the power transition.
-func TestBuildProfilePreservesPowerChangeAtBoundary(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	sched := &Schedule{
-		Slots: []ScheduleSlot{
-			{
-				Date: "2026-01-01",
-				Periods: []SchedulePeriod{
-					{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30},
-					{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 7000, Price: 0.40},
-				},
-			},
-		},
-	}
-
-	profile := BuildProfile(sched, 11000)
-	require.NotNil(t, profile)
-
-	periods := profile.ChargingSchedule.ChargingSchedulePeriod
-	require.Len(t, periods, 3, "power change must be preserved as separate OCPP periods")
-
-	assert.Equal(t, 0, periods[0].StartPeriod)
-	assert.Equal(t, float64(11000), periods[0].Limit)
-	assert.Equal(t, 3600, periods[1].StartPeriod)
-	assert.Equal(t, float64(7000), periods[1].Limit)
-	assert.Equal(t, 2*3600, periods[2].StartPeriod)
-	assert.Equal(t, float64(0), periods[2].Limit)
+func TestBuildPlanProfilePreservesPowerChangeAtBoundary(t *testing.T) {
+	now := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	withNow(t, now)
+	sched := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{
+		{Start: now, End: now.Add(time.Hour), Power: 11000},
+		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 7000},
+	}}}}
+	assert.Equal(t, [][2]float64{{0, 11000}, {3600, 7000}, {7200, 0}}, planPeriods(t, sched))
 }
 
-func TestBuildProfileSkipsCancelledSlots(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	sched := &Schedule{
-		Slots: []ScheduleSlot{
-			{
-				Date:      "2026-01-01",
-				Cancelled: true,
-				Periods: []SchedulePeriod{
-					{Start: now, End: now.Add(time.Hour), Power: 11000},
-				},
-			},
-		},
-	}
-	assert.Nil(t, BuildProfile(sched, 11000))
+func TestBuildPlanProfileSkipsCancelledAndPastPeriods(t *testing.T) {
+	now := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	withNow(t, now)
+	sched := &Schedule{Slots: []ScheduleSlot{
+		{Periods: []SchedulePeriod{{Start: now.Add(-2 * time.Hour), End: now.Add(-time.Hour), Power: 11000}}},
+		{Cancelled: true, Periods: []SchedulePeriod{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000}}},
+		{Periods: []SchedulePeriod{{Start: now.Add(3 * time.Hour), End: now.Add(4 * time.Hour), Power: 11000}}},
+	}}
+	assert.Equal(t, [][2]float64{{0, 0}, {3 * 3600, 11000}, {4 * 3600, 0}}, planPeriods(t, sched))
 }
 
-func TestProfileHash_Deterministic(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	sched := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: now, End: now.Add(time.Hour), Power: 11000},
-				{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
-			},
-		}},
+func TestBuildPlanProfileCapsBlocks(t *testing.T) {
+	now := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	withNow(t, now)
+	var periods []SchedulePeriod
+	for i := 0; i < 2*maxProfileBlocks+4; i += 2 { // every other hour → separate blocks
+		periods = append(periods, SchedulePeriod{Start: now.Add(time.Duration(i) * time.Hour), End: now.Add(time.Duration(i+1) * time.Hour), Power: 11000})
 	}
-	p1 := BuildProfile(sched, 11000)
-	p2 := BuildProfile(sched, 11000)
-
-	h1 := ProfileHash(p1)
-	h2 := ProfileHash(p2)
-
-	assert.NotEmpty(t, h1)
-	assert.Equal(t, h1, h2, "same profile must produce the same hash")
+	p := BuildPlanProfile(&Schedule{Slots: []ScheduleSlot{{Periods: periods}}})
+	require.NotNil(t, p)
+	assert.LessOrEqual(t, len(p.ChargingSchedule.ChargingSchedulePeriod), 2*maxProfileBlocks+1)
 }
 
-func TestProfileHash_DifferentSchedule(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-
-	sched1 := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: now, End: now.Add(time.Hour), Power: 11000},
-			},
-		}},
-	}
-	sched2 := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: now, End: now.Add(2 * time.Hour), Power: 11000},
-			},
-		}},
-	}
-
-	h1 := ProfileHash(BuildProfile(sched1, 11000))
-	h2 := ProfileHash(BuildProfile(sched2, 11000))
-
-	assert.NotEqual(t, h1, h2, "different schedules must produce different hashes")
+func TestPlanHash_Nil(t *testing.T) {
+	assert.Empty(t, planHash(nil))
+	assert.Empty(t, planHash(&Schedule{}))
 }
 
-func TestProfileHash_Nil(t *testing.T) {
-	assert.Empty(t, ProfileHash(nil))
-	assert.Empty(t, ProfileHash(&types.ChargingProfile{}))
-}
-
-func TestScheduleHash_StableAcrossRecomputes(t *testing.T) {
-	origTimeNow := timeNow
-	defer func() { timeNow = origTimeNow }()
-
-	// A schedule with a past period and a future period
-	past := time.Now().Add(-2 * time.Hour).Truncate(time.Hour)
-	future := time.Now().Add(2 * time.Hour).Truncate(time.Hour)
-
-	sched := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: past, End: past.Add(time.Hour), Power: 11000},
-				{Start: future, End: future.Add(time.Hour), Power: 11000},
-			},
-		}},
-	}
-
-	// Hash at time T1: past period already ended, schedule still includes it
-	timeNow = func() time.Time { return past.Add(90 * time.Minute) }
-	h1 := ScheduleHash(sched)
-
-	// Later recompute: past period dropped from schedule, only future remains
-	schedLater := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: future, End: future.Add(time.Hour), Power: 11000},
-			},
-		}},
-	}
-
-	// Hash at time T2 (only future period in schedule)
-	timeNow = func() time.Time { return past.Add(100 * time.Minute) }
-	h2 := ScheduleHash(schedLater)
-
-	assert.Equal(t, h1, h2, "hash should be stable when only past periods change")
-}
-
-func TestScheduleHash_ChangesWhenFutureChanges(t *testing.T) {
-	future := time.Now().Add(2 * time.Hour).Truncate(time.Hour)
-
-	sched1 := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: future, End: future.Add(time.Hour), Power: 11000},
-			},
-		}},
-	}
-	sched2 := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date: "2026-01-01",
-			Periods: []SchedulePeriod{
-				{Start: future, End: future.Add(2 * time.Hour), Power: 11000},
-			},
-		}},
-	}
-
-	h1 := ScheduleHash(sched1)
-	h2 := ScheduleHash(sched2)
-	assert.NotEqual(t, h1, h2, "hash should change when future periods differ")
-}
-
-func TestScheduleHash_Nil(t *testing.T) {
-	assert.Empty(t, ScheduleHash(nil))
-	assert.Empty(t, ScheduleHash(&Schedule{}))
+func TestPlanHash_ChangesWhenFutureChanges(t *testing.T) {
+	now := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	withNow(t, now)
+	a := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000}}}}}
+	b := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{{Start: now.Add(time.Hour), End: now.Add(3 * time.Hour), Power: 11000}}}}}
+	assert.NotEqual(t, planHash(a), planHash(b))
+	// Hourly split vs one long period → same blocks → same hash (no rewrite).
+	c := &Schedule{Slots: []ScheduleSlot{{Periods: []SchedulePeriod{
+		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Power: 11000},
+		{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), Power: 11000},
+	}}}}
+	assert.Equal(t, planHash(b), planHash(c))
 }
 
 func TestIsChargeTime(t *testing.T) {

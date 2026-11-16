@@ -23,7 +23,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
   const [loading, setLoading] = useState(true);
   // Sources are derived from the backend (DISTINCT source from system_events).
   // Cached in state so the dropdown doesn't shrink while a filter is applied
-  // (filtered queries return only that source's events) — only grow it.
+  // (filtered queries return only that source's events), so only grow it.
   const [sources, setSources] = useState<string[]>([]);
 
   const fetchPage = useCallback(async (p: number, source: string) => {
@@ -37,7 +37,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
       setTotal(data.total || 0);
       // Backend returns the DISTINCT source list across all events (not just
       // the current page). Merge into state so any source ever observed stays
-      // in the dropdown — handles the case where filtered queries scope the
+      // in the dropdown. This handles the case where filtered queries scope the
       // sources list to one entry.
       const incoming: string[] = Array.isArray(data.sources) ? data.sources : [];
       if (incoming.length > 0) {
@@ -95,7 +95,7 @@ export function SystemLog({ refreshKey, timezone }: { refreshKey?: number; timez
                 <span className="log-time">
                   {formatTime(ev.timestamp, timezone, locale)}
                 </span>
-                <span className={`source-badge ${ev.source}`}>
+                <span className={`source-badge src-${ev.source}`}>
                   {ev.source}
                 </span>
                 <span className="log-action">{ev.action}</span>

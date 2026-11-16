@@ -1,7 +1,7 @@
 // Package events provides typed instrumentation helpers for recording
 // system events to the store. Use events.For(SourceXxx, store) once in a
 // component's constructor, then call .Info/.Warn/.Error with an Action
-// constant from this package — never write a literal action string.
+// constant from this package, never write a literal action string.
 package events
 
 import "time"
@@ -33,7 +33,7 @@ type Bound struct {
 	source Source
 }
 
-// For returns a recorder bound to the given source. nil-safe — calls on
+// For returns a recorder bound to the given source. nil-safe: calls on
 // a Bound with nil recorder are no-ops, so tests that don't supply a
 // store still work.
 func For(source Source, rec Recorder) *Bound {

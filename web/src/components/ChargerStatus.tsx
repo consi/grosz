@@ -1,160 +1,85 @@
 import type { ChargePointInfo, Schedule } from '../types';
 import { useTranslation } from '../i18n';
+import { chargePointState, chargerStateLabelKey, chargerStateTone, formatPower, type ChargerState } from '../utils/chargerState';
 
 interface Props {
   chargePoints: ChargePointInfo[];
   schedule?: Schedule;
   charging: boolean;
-  mode: 'off' | 'schedule' | 'force';
-  pendingMode?: 'off' | 'schedule' | 'force';
-  onModeChange: (mode: 'off' | 'schedule' | 'force') => void;
-  error?: string | null;
 }
 
-type CarState = 'unplugged' | 'plugged' | 'charging' | 'suspended' | 'error' | 'offline';
-
-function deriveCarState(status: string): CarState {
-  switch (status) {
-    case 'Charging': return 'charging';
-    case 'Preparing':
-    case 'Finishing': return 'plugged';
-    case 'SuspendedEV':
-    case 'SuspendedEVSE': return 'suspended';
-    case 'Faulted': return 'error';
-    case 'Unavailable': return 'offline';
-    default: return 'unplugged';
-  }
-}
-
-const carStateColors: Record<CarState, string> = {
-  unplugged: '#98989d',
-  plugged: '#ff9f0a',
-  charging: '#30d158',
-  suspended: '#bf5af2',
-  error: '#ff453a',
-  offline: '#636366',
+const stateIcons: Record<ChargerState, string> = {
+  unplugged: 'M9 2v6m6-6v6M6 8h12v3a6 6 0 0 1-12 0zm6 9v5',
+  plugged: 'M9 2v6m6-6v6M6 8h12v3a6 6 0 0 1-12 0zm6 9v5',
+  charging: 'M13 2 3 14h9l-1 8 10-12h-9z',
+  pausedGap: 'M9 5v14m6-14v14',
+  pausedEV: 'M9 5v14m6-14v14',
+  error: 'M12 3 2 21h20zm0 6v5m0 3v.01',
+  offline: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',
 };
 
-const carStateIcons: Record<CarState, string> = {
-  unplugged: '🔌',
-  plugged: '🔋',
-  charging: '⚡',
-  suspended: '⏸',
-  error: '⚠',
-  offline: '◯',
-};
-
-function formatPower(watts: number): string {
-  if (watts >= 1000) return `${(watts / 1000).toFixed(2)} kW`;
-  return `${watts.toFixed(0)} W`;
-}
-
-export function ChargerStatus({ chargePoints, schedule, charging, mode, pendingMode, onModeChange, error }: Props) {
+export function ChargerStatus({ chargePoints, schedule, charging }: Props) {
   const { t } = useTranslation();
 
-  const carStateLabelKeys: Record<CarState, Parameters<typeof t>[0]> = {
-    unplugged: 'charger.stateUnplugged',
-    plugged: 'charger.statePlugged',
-    charging: 'charger.stateCharging',
-    suspended: 'charger.statePaused',
-    error: 'charger.stateFault',
-    offline: 'charger.stateUnavailable',
-  };
-
-  const modes = [
-    { value: 'off' as const, label: t('charger.modeOff') },
-    { value: 'schedule' as const, label: t('charger.modeSchedule') },
-    { value: 'force' as const, label: t('charger.modeForce') },
-  ];
-
   return (
-    <div className="card">
-      <div className="charger-top">
+    <section className="card charger-card">
+      <div className="card-head">
         <h2>{t('charger.heading')}</h2>
-        <div className="mode-toggle">
-          {modes.map((m) => {
-            const isActive = mode === m.value;
-            const isPending = pendingMode != null && pendingMode === m.value && pendingMode !== mode;
-            return (
-              <button
-                key={m.value}
-                className={`mode-btn ${m.value} ${isActive ? 'active' : ''} ${isPending ? 'pending' : ''}`}
-                onClick={() => onModeChange(m.value)}
-              >
-                {m.label}
-              </button>
-            );
-          })}
-        </div>
       </div>
-      {error && <div className="mode-error">{error}</div>}
 
       {!chargePoints?.length ? (
-        <p className="muted">{t('charger.noChargers')}</p>
+        <p className="muted empty">{t('charger.noChargers')}</p>
       ) : (
         chargePoints.map((cp) => {
           const conn = cp.connectors?.[0];
-          const state = conn ? deriveCarState(conn.status) : (cp.connected ? 'unplugged' : 'offline');
-          const color = carStateColors[state];
-          const power = conn?.measurements?.['Power.Active.Import']?.value ?? 0;
-          const energy = conn?.measurements?.['Energy.Active.Import.Register']?.value;
-          const voltage = conn?.measurements?.['Voltage']?.value;
+          const state = chargePointState(cp);
+          const tone = chargerStateTone[state];
+          const m = conn?.measurements;
+          const power = m?.['Power.Active.Import']?.value ?? 0;
+          const energy = m?.['Energy.Active.Import.Register']?.value;
+          const voltage = m?.['Voltage']?.value;
+          const current = m?.['Current.Import']?.value;
+          const offered = m?.['Current.Offered']?.value;
+          const showDetails = (state === 'charging' || state === 'plugged' || state === 'pausedGap' || state === 'pausedEV') && !!m;
 
           return (
             <div key={cp.id} className="charger">
-              <div className="charger-header">
-                <span className={`dot ${cp.connected ? 'online' : 'offline'}`} />
+              <div className="charger-id">
+                <span className={`dot ${cp.connected ? 'online' : 'offline'}`} aria-hidden="true" />
                 <strong>{cp.id}</strong>
-                {cp.vendor && <span className="muted"> {cp.vendor} {cp.model}</span>}
+                {cp.vendor && <span className="muted">{cp.vendor} {cp.model}</span>}
               </div>
 
-              <div className="car-state" style={{ borderLeftColor: color }}>
-                <div className="car-state-main">
-                  <span className="car-state-icon">{carStateIcons[state]}</span>
-                  <span className="car-state-label" style={{ color }}>{t(carStateLabelKeys[state])}</span>
-                  {state === 'charging' && (
-                    <span className="car-state-power">{formatPower(power)}</span>
+              <div className={`charger-state tone-${tone}`}>
+                <svg className="charger-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d={stateIcons[state]} />
+                </svg>
+                <span className="charger-state-label">{t(chargerStateLabelKey[state])}</span>
+                {state === 'charging' && <span className="charger-state-power num">{formatPower(power)}</span>}
+              </div>
+
+              {showDetails && (
+                <dl className="stat-list">
+                  {state === 'charging' && power > 0 && (
+                    <div><dt>{t('charger.power')}</dt><dd className="num">{formatPower(power)}</dd></div>
                   )}
-                </div>
-
-                {(state === 'charging' || state === 'plugged' || state === 'suspended') && conn?.measurements && (
-                  <div className="car-state-details">
-                    {state === 'charging' && power > 0 && (
-                      <div className="car-detail">
-                        <span className="muted">{t('charger.power')}</span>
-                        <span>{formatPower(power)}</span>
-                      </div>
-                    )}
-                    {energy != null && (
-                      <div className="car-detail">
-                        <span className="muted">{t('charger.meter')}</span>
-                        <span>{(energy / 1000).toFixed(2)} kWh</span>
-                      </div>
-                    )}
-                    {voltage != null && (
-                      <div className="car-detail">
-                        <span className="muted">{t('charger.voltage')}</span>
-                        <span>{voltage.toFixed(0)} V</span>
-                      </div>
-                    )}
-                    {conn.measurements['Current.Import'] && (
-                      <div className="car-detail">
-                        <span className="muted">{t('charger.current')}</span>
-                        <span>{conn.measurements['Current.Import'].value.toFixed(1)} A</span>
-                      </div>
-                    )}
-                    {conn.measurements['Current.Offered'] && (
-                      <div className="car-detail">
-                        <span className="muted">{t('charger.offered')}</span>
-                        <span>{conn.measurements['Current.Offered'].value.toFixed(1)} A</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                  {energy != null && (
+                    <div><dt>{t('charger.meter')}</dt><dd className="num">{(energy / 1000).toFixed(2)} kWh</dd></div>
+                  )}
+                  {voltage != null && (
+                    <div><dt>{t('charger.voltage')}</dt><dd className="num">{voltage.toFixed(0)} V</dd></div>
+                  )}
+                  {current != null && (
+                    <div><dt>{t('charger.current')}</dt><dd className="num">{current.toFixed(1)} A</dd></div>
+                  )}
+                  {offered != null && (
+                    <div><dt>{t('charger.offered')}</dt><dd className="num">{offered.toFixed(1)} A</dd></div>
+                  )}
+                </dl>
+              )}
 
               {charging && schedule && (
-                <div className="schedule-summary">
+                <div className="charger-plan num">
                   <span>{t('charger.scheduled', { energy: schedule.energy })}</span>
                   <span>{t('charger.estCost', { cost: schedule.cost.toFixed(2) })}</span>
                 </div>
@@ -163,6 +88,6 @@ export function ChargerStatus({ chargePoints, schedule, charging, mode, pendingM
           );
         })
       )}
-    </div>
+    </section>
   );
 }

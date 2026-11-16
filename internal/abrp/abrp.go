@@ -20,7 +20,7 @@ import (
 )
 
 // genericAPIKey is ABRP's public, documented DIY/"generic" application key.
-// It identifies the integration type to Iternio and is NOT a user secret —
+// It identifies the integration type to Iternio and is NOT a user secret:
 // every generic third-party sender uses the same value (same posture as the
 // reverse-engineered Renault app keys). The per-user token is what's private,
 // and that lives in settings (abrp.token), never in code.
@@ -140,7 +140,7 @@ func (c *Client) Send(ctx context.Context, tlm Telemetry) error {
 }
 
 // eventInput renders a Telemetry into a compact, readable map for the system
-// event log — the "details about the update" surfaced in the System Log tab.
+// event log: the "details about the update" surfaced in the System Log tab.
 func eventInput(tlm Telemetry) map[string]any {
 	in := map[string]any{
 		"soc":        tlm.SoC,

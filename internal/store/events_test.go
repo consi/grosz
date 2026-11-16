@@ -156,7 +156,7 @@ func TestLatestEnergyForTransaction_NoData(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Two different transactions interleaved — make sure we filter to the right one.
+// Two different transactions interleaved: make sure we filter to the right one.
 func TestLatestEnergyForTransaction_FiltersByTransaction(t *testing.T) {
 	s := testStore(t)
 

@@ -1,12 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import { PasskeyManager } from './PasskeyManager';
+import { OcppConsole } from './OcppConsole';
 import { useTranslation, locales } from '../i18n';
 import type { Locale, TranslationKey } from '../i18n';
-import type { RenaultTfaStatus } from '../types';
+import type { ChargePointInfo, RenaultTfaStatus } from '../types';
 
 interface SettingGroup {
   titleKey: TranslationKey;
-  keys: { key: string; labelKey: TranslationKey; type: 'text' | 'number' | 'toggle' | 'select' | 'password'; options?: string[] }[];
+  keys: SettingField[];
+}
+
+interface SettingField {
+  key: string;
+  labelKey: TranslationKey;
+  type: 'text' | 'number' | 'toggle' | 'select' | 'password' | 'time';
+  options?: string[];
+  helpKey?: TranslationKey;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 const timezones: string[] = (() => {
@@ -85,20 +97,20 @@ const groups: SettingGroup[] = [
       { key: 'vehicle.vin', labelKey: 'settings.vin', type: 'text' },
       { key: 'vehicle.poll_interval', labelKey: 'settings.socPollInterval', type: 'number' },
       { key: 'vehicle.require_plug_check', labelKey: 'settings.requirePlugCheck', type: 'toggle' },
-      { key: 'scheduler.battery_capacity', labelKey: 'settings.batteryCapacity', type: 'number' },
-      { key: 'scheduler.charge_headroom', labelKey: 'settings.chargeHeadroom', type: 'number' },
     ],
   },
   {
-    titleKey: 'settings.scheduler',
+    titleKey: 'settings.planning',
     keys: [
       { key: 'scheduler.enabled', labelKey: 'settings.enabled', type: 'toggle' },
-      { key: 'scheduler.target_soc', labelKey: 'settings.targetSoc', type: 'number' },
-      { key: 'scheduler.skip_above_soc', labelKey: 'settings.skipAboveSoc', type: 'number' },
-      { key: 'scheduler.min_soc', labelKey: 'settings.minSoc', type: 'number' },
-      { key: 'scheduler.max_price', labelKey: 'settings.maxPrice', type: 'number' },
-      { key: 'scheduler.target_energy', labelKey: 'settings.targetEnergy', type: 'number' },
-      { key: 'scheduler.deadline_time', labelKey: 'settings.deadline', type: 'text' },
+      { key: 'scheduler.target_soc', labelKey: 'settings.targetSoc', helpKey: 'settings.targetSocHelp', type: 'number', min: 50, max: 100, step: 5 },
+      { key: 'scheduler.departure_time', labelKey: 'settings.departureTime', helpKey: 'settings.departureTimeHelp', type: 'time' },
+      { key: 'scheduler.safe_soc', labelKey: 'settings.safeSoc', helpKey: 'settings.safeSocHelp', type: 'number', min: 0, max: 100, step: 5 },
+      { key: 'scheduler.min_soc', labelKey: 'settings.minSoc', helpKey: 'settings.minSocHelp', type: 'number', min: 0, max: 100, step: 5 },
+      { key: 'scheduler.max_price', labelKey: 'settings.maxPrice', helpKey: 'settings.maxPriceHelp', type: 'number', min: 0, step: 0.01 },
+      { key: 'scheduler.cheap_fill_price', labelKey: 'settings.cheapFillPrice', helpKey: 'settings.cheapFillPriceHelp', type: 'number', min: 0, step: 0.01 },
+      { key: 'scheduler.cheap_fill_soc', labelKey: 'settings.cheapFillSoc', helpKey: 'settings.cheapFillSocHelp', type: 'number', min: 50, max: 100, step: 5 },
+      { key: 'scheduler.battery_capacity', labelKey: 'settings.batteryCapacity', helpKey: 'settings.batteryCapacityHelp', type: 'number', min: 1, step: 0.1 },
     ],
   },
   {
@@ -109,7 +121,10 @@ const groups: SettingGroup[] = [
   },
 ];
 
-export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoStart, onRenaultTfaAutoStartConsumed }: { refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void; renaultTfaAutoStart?: boolean; onRenaultTfaAutoStartConsumed?: () => void }) {
+export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoStart, onRenaultTfaAutoStartConsumed, chargePoints = [], timezone }: {
+  refreshKey?: number; locale: Locale; onLocaleChange: (l: Locale) => void; renaultTfaAutoStart?: boolean; onRenaultTfaAutoStartConsumed?: () => void;
+  chargePoints?: ChargePointInfo[]; timezone: string;
+}) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState<Record<string, string>>({});
@@ -158,6 +173,7 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
   return (
     <div className="card settings">
       <h2>{t('settings.heading')}</h2>
+      <div className="settings-grid">
       <fieldset>
         <legend>{t('passkey.heading')}</legend>
         <PasskeyManager />
@@ -174,9 +190,9 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
               </select>
             </label>
           )}
-          {g.keys.map(({ key, labelKey, type, options }) => (
+          {g.keys.map(({ key, labelKey, type, options, helpKey, min, max, step }) => (
             <label key={key} className="setting-row">
-              <span>{t(labelKey)}</span>
+              <span>{t(labelKey)}{helpKey && <small className="setting-help">{t(helpKey)}</small>}</span>
               {type === 'toggle' ? (
                 <input
                   type="checkbox"
@@ -189,7 +205,11 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
                 </select>
               ) : (
                 <input
-                  type={type === 'password' ? 'password' : type}
+                  type={type}
+                  min={min}
+                  max={max}
+                  step={step}
+                  inputMode={type === 'number' ? 'decimal' : undefined}
                   value={getValue(key)}
                   onChange={(e) => handleChange(key, e.target.value)}
                   autoComplete={type === 'password' ? 'off' : undefined}
@@ -222,10 +242,13 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
             onMaintenanceModeChange={(enabled) => {
               setSettings((s) => ({ ...s, 'zappi.maintenance_mode': enabled ? 'true' : 'false' }));
             }}
+            chargePoints={chargePoints}
+            timezone={timezone}
           />
         )}
         </div>
       ))}
+      </div>
       <div className="settings-actions">
         <button className="btn primary" onClick={handleSave} disabled={saving || !Object.keys(dirty).length}>
           {saving ? t('settings.saving') : t('settings.saveChanges')}
@@ -236,12 +259,15 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
   );
 }
 
-function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: {
+function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange, chargePoints, timezone }: {
   cpID: string;
   maintenanceMode: boolean;
   onMaintenanceModeChange: (enabled: boolean) => void;
+  chargePoints: ChargePointInfo[];
+  timezone: string;
 }) {
   const { t } = useTranslation();
+  const [consoleOpen, setConsoleOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [pendingReset, setPendingReset] = useState<'Hard' | 'Soft' | null>(null);
@@ -314,6 +340,7 @@ function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: 
     <fieldset>
       <legend>{t('settings.maintenance')}</legend>
       {disabled && <div className="msg">{t('settings.maintenanceNoCharger')}</div>}
+      <div className="maint-grid">
       <div className="setting-row">
         <span>{t('settings.maintenanceMode')}</span>
         <button
@@ -326,6 +353,12 @@ function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: 
             : maintenanceMode
               ? t('settings.disableMaintenanceMode')
               : t('settings.enableMaintenanceMode')}
+        </button>
+      </div>
+      <div className="setting-row">
+        <span>{t('console.open')}</span>
+        <button className="btn primary btn-sm" aria-haspopup="dialog" onClick={() => setConsoleOpen(true)}>
+          {t('console.openButton')}
         </button>
       </div>
       <div className="setting-row">
@@ -368,11 +401,14 @@ function MaintenanceSection({ cpID, maintenanceMode, onMaintenanceModeChange }: 
           {pendingReset === 'Hard' ? t('settings.confirmAction') : t('settings.hardReset')}
         </button>
       </div>
+      </div>
       {msg && (
         <div className="msg" style={{ color: msg.kind === 'err' ? 'var(--danger)' : undefined }}>
           {msg.text}
         </div>
       )}
+      <OcppConsole open={consoleOpen} onClose={() => setConsoleOpen(false)} timezone={timezone}
+        chargePoints={chargePoints} defaultCpId={cpID || undefined} />
     </fieldset>
   );
 }

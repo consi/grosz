@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
+	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/vehicle"
 )
 
@@ -100,5 +103,74 @@ func (s *Server) handleSetSocTarget(w http.ResponseWriter, r *http.Request) {
 		s.scheduler.ReloadConfig()
 	}
 
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleStartTrip prepares the car for a trip: raises the car's charge limit
+// (default 100%) and records when it must be ready (default: next departure).
+// The planner then reaches the limit by that time in the cheapest hours, and
+// the limit returns to the normal target when the car is unplugged.
+func (s *Server) handleStartTrip(w http.ResponseWriter, r *http.Request) {
+	if s.renault == nil {
+		http.Error(w, "renault not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Target  int    `json:"target"`
+		ReadyBy string `json:"readyBy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Target == 0 {
+		req.Target = 100
+	}
+	if req.Target < 50 || req.Target > 100 {
+		http.Error(w, "target must be between 50 and 100", http.StatusBadRequest)
+		return
+	}
+	readyBy := ""
+	if req.ReadyBy != "" {
+		t, err := time.Parse(time.RFC3339, req.ReadyBy)
+		if err != nil || !t.After(time.Now()) {
+			http.Error(w, "readyBy must be a future RFC3339 time", http.StatusBadRequest)
+			return
+		}
+		readyBy = t.UTC().Format(time.RFC3339)
+	}
+	if err := s.renault.SetSocTarget(req.Target); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	_ = s.store.Set("vehicle.soc_target", strconv.Itoa(req.Target))
+	_ = s.store.Set("scheduler.fill_raised_from", "")
+	_ = s.store.Set("scheduler.trip_ready_by", readyBy)
+	s.web.Info(events.ActionTripSet, map[string]any{"target": req.Target, "readyBy": readyBy}, nil)
+	if s.scheduler != nil {
+		s.scheduler.ReloadConfig()
+	}
+	s.BroadcastStatus()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleCancelTrip restores the normal charge limit and clears the trip.
+func (s *Server) handleCancelTrip(w http.ResponseWriter, r *http.Request) {
+	if s.renault == nil {
+		http.Error(w, "renault not configured", http.StatusServiceUnavailable)
+		return
+	}
+	normal := s.store.GetInt("scheduler.target_soc", 80)
+	if err := s.renault.SetSocTarget(normal); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	_ = s.store.Set("vehicle.soc_target", strconv.Itoa(normal))
+	_ = s.store.Set("scheduler.trip_ready_by", "")
+	s.web.Info(events.ActionTripCancelled, map[string]any{"target": normal}, nil)
+	if s.scheduler != nil {
+		s.scheduler.ReloadConfig()
+	}
+	s.BroadcastStatus()
 	writeJSON(w, map[string]any{"ok": true})
 }

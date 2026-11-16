@@ -29,7 +29,7 @@ type SoCUpdater func(energyKWh float64)
 type ConnectorStatusHook func(cpID string, connectorID int, status string)
 
 // PlugEventHook is called only on a real connector transition into a socket
-// state worth a fresh vehicle poll — plug (Preparing), unplug (Available), or
+// state worth a fresh vehicle poll: plug (Preparing), unplug (Available), or
 // charge-complete (SuspendedEV). Unlike ConnectorStatusHook it is deduped
 // against persisted connector state, so periodic status re-notifications and
 // websocket reconnects don't fire it.
@@ -50,13 +50,21 @@ type Server struct {
 	// during the WebSocket upgrade. The gorilla connection's RemoteAddr only
 	// sees the reverse-proxy peer, so we stash the real IP here and read it
 	// in the connect handler.
-	realAddrs      map[string]string
-	store          *store.Store
-	events         *events.Bound
-	log            *slog.Logger
-	bootHooks      []BootHook
-	statusHook     StatusHook
-	socUpdater     SoCUpdater
+	realAddrs  map[string]string
+	store      *store.Store
+	events     *events.Bound
+	log        *slog.Logger
+	bootHooks  []BootHook
+	statusHook StatusHook
+	socUpdater SoCUpdater
+	// finalizeDelay is how long a "charge complete"-type status must persist
+	// before the DB session is provisionally finalized. Zappi emits a
+	// transient SuspendedEV during its RCD check seconds after every start;
+	// finalizing on that recorded real 20–40 kWh sessions as 0.01 kWh.
+	// Zero = finalize synchronously (tests).
+	finalizeDelay time.Duration
+	// eventHook receives every recorded OCPP message (debug console live view).
+	eventHook      func(store.Event)
 	connStatusHook ConnectorStatusHook
 	plugEventHook  PlugEventHook
 	txnEndedHook   TransactionEndedHook
@@ -83,17 +91,18 @@ func NewServer(st *store.Store, log *slog.Logger) *Server {
 	cs := ocpp16.NewCentralSystem(nil, wsServer)
 
 	s := &Server{
-		cs:        cs,
-		points:    make(map[string]*ChargePoint),
-		realAddrs: make(map[string]string),
-		store:     st,
-		events:    events.For(events.SourceOCPP, st),
-		log:       log.With("component", "ocpp"),
+		cs:            cs,
+		points:        make(map[string]*ChargePoint),
+		realAddrs:     make(map[string]string),
+		store:         st,
+		events:        events.For(events.SourceOCPP, st),
+		log:           log.With("component", "ocpp"),
+		finalizeDelay: 10 * time.Minute,
 	}
 
 	// Capture the real client IP from X-Forwarded-For during the upgrade.
 	// The CentralSystem invokes this with the full *http.Request before it
-	// hands us the WebSocket. We always allow the connection — this is purely
+	// hands us the WebSocket. We always allow the connection: this is purely
 	// a header-stash, not an auth check (Basic Auth runs first).
 	//
 	// NOTE: must go through the CentralSystem (which routes to ocppj.Server),
@@ -184,6 +193,13 @@ func (s *Server) Stop() {
 }
 
 // RegisterBootHook adds a function to be called after BootNotification.
+// SetEventHook registers a callback for every recorded OCPP message.
+func (s *Server) SetEventHook(fn func(store.Event)) {
+	s.mu.Lock()
+	s.eventHook = fn
+	s.mu.Unlock()
+}
+
 func (s *Server) RegisterBootHook(hook BootHook) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,6 +377,12 @@ func (s *Server) recordEvent(direction, chargeBox, action string, payload any) {
 	if err := s.store.RecordEvent(e); err != nil {
 		s.log.Warn("failed to record event", "action", action, "err", err)
 	}
+	s.mu.RLock()
+	hook := s.eventHook
+	s.mu.RUnlock()
+	if hook != nil {
+		hook(e)
+	}
 
 	// Purge old events at most once per hour
 	s.mu.Lock()
@@ -370,6 +392,7 @@ func (s *Server) recordEvent(direction, chargeBox, action string, payload any) {
 		_ = s.store.PurgeOldEvents(48 * time.Hour)
 		_ = s.store.PurgeOldSystemEvents(24 * time.Hour)
 		_ = s.store.PurgeChartMarkers(7 * 24 * time.Hour)
+		_ = s.store.PurgePlugHistory(60 * 24 * time.Hour)
 	} else {
 		s.mu.Unlock()
 	}

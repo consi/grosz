@@ -164,14 +164,14 @@ func TestShouldRefreshDetails(t *testing.T) {
 	st := testStore(t)
 	r := testRenault(t, st, "http://unused")
 
-	// Never fetched — should refresh
+	// Never fetched: should refresh
 	assert.True(t, r.shouldRefreshDetails())
 
-	// Just fetched — should not refresh
+	// Just fetched: should not refresh
 	r.markDetailsFetched(time.Now())
 	assert.False(t, r.shouldRefreshDetails())
 
-	// Fetched 25h ago — should refresh
+	// Fetched 25h ago: should refresh
 	r.markDetailsFetched(time.Now().Add(-25 * time.Hour))
 	assert.True(t, r.shouldRefreshDetails())
 }
@@ -285,7 +285,7 @@ func TestTFAFlowHappyPath(t *testing.T) {
 	)
 
 	// The device starts untrusted (login → 403101 challenge) and becomes trusted
-	// once finalizeTFA lands, after which the same login mints a real session —
+	// once finalizeTFA lands, after which the same login mints a real session:
 	// exactly how Gigya treats the gmid before vs. after the TFA flow.
 	var deviceTrusted atomic.Bool
 
@@ -394,7 +394,7 @@ func TestCompleteTFAWithoutPending(t *testing.T) {
 }
 
 // TestSetSocTargetUsesCachedSocMin verifies the write reuses the cached socMin
-// (no extra getSocLevel call) and preserves it in the POST body — the core API
+// (no extra getSocLevel call) and preserves it in the POST body: the core API
 // saving of the event-based refactor.
 func TestSetSocTargetUsesCachedSocMin(t *testing.T) {
 	var getHits int32
@@ -407,7 +407,7 @@ func TestSetSocTargetUsesCachedSocMin(t *testing.T) {
 			atomic.AddInt32(&getHits, 1)
 			w.WriteHeader(http.StatusNotFound)
 		})
-	// POST soc-levels (plural) — the write endpoint.
+	// POST soc-levels (plural): the write endpoint.
 	mux.HandleFunc("/commerce/v1/accounts/test-account/kamereon/kcm/v1/vehicles/TESTVIN/ev/soc-levels",
 		func(w http.ResponseWriter, r *http.Request) {
 			var body struct {
@@ -540,7 +540,7 @@ func TestGetSocLevelWrappedFallback(t *testing.T) {
 	assert.Equal(t, 90, lvl.SocTarget)
 }
 
-// TestSocLevelSkippedWhenKnownAndFresh verifies the redundancy fix: once the
+// TestSocLevelSkippedWhenKnownAndFresh verifies the redundancy fix, once the
 // limits are known and recently read, a slow-tier poll does NOT re-hit the
 // strict-quota soc-level endpoint.
 func TestSocLevelSkippedWhenKnownAndFresh(t *testing.T) {
@@ -661,7 +661,7 @@ func TestPollOnceTierBFetchesAndCaches(t *testing.T) {
 }
 
 // TestSocLevelBackoffAfter429 verifies that a soc-level 429 persists a backoff
-// and suppresses further soc-level calls until it expires — so we stop pinning
+// and suppresses further soc-level calls until it expires, so we stop pinning
 // the exhausted quota (and don't re-hit it on every restart).
 func TestSocLevelBackoffAfter429(t *testing.T) {
 	var socLevelHits, batteryHits int32

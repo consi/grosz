@@ -140,9 +140,46 @@ func (s *Store) StopSession(txnID int, stopTime time.Time, meterStop, energy, co
 	return nil
 }
 
+// CompleteSessionFromStop applies the charger's authoritative
+// StopTransaction to a session. Unlike StopSession it also overwrites a
+// session that was provisionally finalized earlier (on a SuspendedEV
+// status): the StopTransaction's meterStop is the only reading guaranteed
+// to belong to this transaction, so it always wins. Energy is derived from
+// the row's own meter_start. wasActive reports whether the session was
+// still active (i.e. this call is the one that closed it). Returns
+// sql.ErrNoRows when no session exists for txnID.
+func (s *Store) CompleteSessionFromStop(txnID int, stopTime time.Time, meterStopKWh float64, costFn func(start, stop time.Time, energy float64) float64) (wasActive bool, energy, cost float64, err error) {
+	var status, startStr string
+	var meterStart float64
+	err = s.db.QueryRow(
+		`SELECT status, start_time, COALESCE(meter_start, 0) FROM charging_sessions WHERE transaction_id = ?`,
+		txnID,
+	).Scan(&status, &startStr, &meterStart)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	startTime, _ := time.Parse(time.RFC3339, startStr)
+	energy = meterStopKWh - meterStart
+	if energy < 0 {
+		energy = 0
+	}
+	if costFn != nil {
+		cost = costFn(startTime, stopTime, energy)
+	}
+	if status == "active" {
+		return true, energy, cost, s.StopSession(txnID, stopTime, meterStopKWh, energy, cost)
+	}
+	_, err = s.db.Exec(
+		`UPDATE charging_sessions SET stop_time = ?, meter_stop = ?, energy = ?, cost = ?, status = 'completed'
+		 WHERE transaction_id = ?`,
+		stopTime.UTC().Format(time.RFC3339), meterStopKWh, energy, cost, txnID,
+	)
+	return false, energy, cost, err
+}
+
 // SessionsOverlapping reports whether any session intersects [start, end).
 // An active session (no stop_time) overlaps as long as its start_time is
-// before end. Used by the scheduler to detect "missed" planned periods —
+// before end. Used by the scheduler to detect "missed" planned periods:
 // when a scheduled charging hour elapsed without any session touching it.
 func (s *Store) SessionsOverlapping(start, end time.Time) (bool, error) {
 	startStr := start.UTC().Format(time.RFC3339)
@@ -290,7 +327,7 @@ func (s *Store) SessionReportByRange(from, to time.Time) (*SessionReport, error)
 		r.IdleEnergy += oldEnergy
 		r.IdleCost += oldCost
 	} else if !hasMeter {
-		// No meter data at all in the range — fall back entirely.
+		// No meter data at all in the range: fall back entirely.
 		r.IdleEnergy, r.IdleCost, _ = s.SumDailyIdle(from, to)
 	}
 

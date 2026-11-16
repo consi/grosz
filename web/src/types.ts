@@ -28,7 +28,13 @@ export interface SchedulePeriod {
   power: number;
   price: number;
   source?: 'auto' | 'user_force';
+  // Why the planner picked this period; fillSoc is the raised car limit for cheapFill.
+  reason?: PeriodReason;
+  fillSoc?: number;
 }
+
+export type PeriodReason = 'needed' | 'cheapest' | 'trip' | 'floor' | 'negative' | 'cheapFill' | 'manual';
+export type PlanMode = 'charge' | 'wait' | 'trip' | 'floor' | 'full' | 'paused' | 'noRates';
 
 export interface ScheduleSlot {
   date: string;
@@ -44,6 +50,10 @@ export interface Schedule {
   cost: number;
   energy: number;
   deadline: string;
+  mode?: PlanMode;
+  target?: number;
+  readyBy?: string;
+  needKwh?: number;
 }
 
 export interface ScheduleOverride {
@@ -65,12 +75,17 @@ export interface StatusResponse {
   pendingModeApplyAt?: string;
   soc: number;
   minSoc: number;
-  skipAboveSoc: number;
+  safeSoc: number;
   socTarget: number;
+  normalTarget: number;
+  planMode?: PlanMode;
+  tripReadyBy?: string;
+  tripActive?: boolean; // car limit raised by the user (not by a cheap fill)
+  fillActive?: boolean; // grosz raised the limit for a cheap fill
   skipReason?: string;
   skipReasonKey?: string;
   skipReasonParams?: Record<string, string>;
-  deadlineTime: string;
+  departureTime: string;
   batteryAutonomy: number;
   chargingStatus: number;
   plugStatus: number;
@@ -80,6 +95,14 @@ export interface StatusResponse {
   vehiclePicture?: string;
   mileage?: number;
   renaultTfaRequired?: boolean;
+}
+
+export interface ProfileStatus {
+  inSync: boolean;
+  writesLastHour: number;
+  writeBudget: number;
+  backoffUntil?: string;
+  paused: boolean;
 }
 
 export interface RenaultTfaStatus {

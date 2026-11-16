@@ -157,7 +157,7 @@ func (p *Poller) adjustEnergy(rawWh float64) float64 {
 			map[string]any{"newOffsetWh": p.energyOffset},
 		)
 	} else if effective < p.lastEffective {
-		// Small decrease (within threshold) — clamp to keep the series monotonic.
+		// Small decrease (within threshold): clamp to keep the series monotonic.
 		effective = p.lastEffective
 	}
 	p.lastEffective = effective

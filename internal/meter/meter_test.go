@@ -73,7 +73,7 @@ func TestAdjustEnergy_SmallNoiseClampedNotReset(t *testing.T) {
 	p := newTestPoller(t)
 	p.initEnergyState()
 	p.adjustEnergy(5000)
-	// Drop by 200 Wh (below 1000 Wh threshold) — clamp, no offset change
+	// Drop by 200 Wh (below 1000 Wh threshold): clamp, no offset change
 	got := p.adjustEnergy(4800)
 	assert.Equal(t, 5000.0, got, "small drop should clamp to previous effective")
 	assert.Equal(t, 0.0, p.energyOffset, "offset must NOT change for sub-threshold drops")
@@ -90,7 +90,7 @@ func TestAdjustEnergy_LoadsPersistedOffsetOnInit(t *testing.T) {
 	assert.Equal(t, 5000.0, p.energyOffset)
 	assert.Equal(t, 6000.0, p.lastEffective)
 
-	// First poll after restart: raw=1100 (i.e., real meter at 1100 — was 1000 before),
+	// First poll after restart: raw=1100 (i.e. the real meter is at 1100, it was 1000 before),
 	// effective should = 1100+5000 = 6100, monotonic continues.
 	got := p.adjustEnergy(1100)
 	assert.Equal(t, 6100.0, got)

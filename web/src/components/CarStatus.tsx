@@ -10,7 +10,7 @@ const SOC_DEFAULT = 80;
 interface Props {
   soc: number;
   minSoc: number;
-  skipAboveSoc: number;
+  safeSoc: number;
   socTarget: number;
   batteryAutonomy: number;
   chargingStatus: number;
@@ -32,20 +32,20 @@ function clampLimit(v: number): number {
   return Math.min(SOC_MAX, Math.max(SOC_MIN, n));
 }
 
-function socBarColor(soc: number, minSoc: number, skipAboveSoc: number): string {
+function socBarColor(soc: number, minSoc: number, safeSoc: number): string {
   if (minSoc > 0 && soc < minSoc) return 'var(--danger)';
-  if (skipAboveSoc > 0 && soc >= skipAboveSoc) return 'var(--primary)';
-  return '#ff9f0a';
+  if (safeSoc > 0 && soc >= safeSoc) return 'var(--primary)';
+  return 'var(--warning)';
 }
 
 function near(a: number, b: number): boolean {
   return Math.abs(a - b) < 0.01;
 }
 
-export function CarStatus({ soc, minSoc, skipAboveSoc, socTarget, batteryAutonomy, chargingStatus, plugStatus, chargingRemainingTime, vehicleModel, vehiclePicture, mileage, onSocTargetChange }: Props) {
+export function CarStatus({ soc, minSoc, safeSoc, socTarget, batteryAutonomy, chargingStatus, plugStatus, chargingRemainingTime, vehicleModel, vehiclePicture, mileage, onSocTargetChange }: Props) {
   const { t } = useTranslation();
   const [imgError, setImgError] = useState(false);
-  const barColor = socBarColor(soc, minSoc, skipAboveSoc);
+  const barColor = socBarColor(soc, minSoc, safeSoc);
   const hasData = soc > 0 || batteryAutonomy > 0;
   const showImage = vehiclePicture && !imgError;
 
@@ -53,7 +53,7 @@ export function CarStatus({ soc, minSoc, skipAboveSoc, socTarget, batteryAutonom
     if (near(chargingStatus, 1.0)) return { label: t('car.chargingStatusCharging'), color: 'var(--primary)' };
     if (near(chargingStatus, 0.2)) return { label: t('car.chargingStatusComplete'), color: 'var(--primary)' };
     if (near(chargingStatus, 0.1)) return { label: t('car.chargingStatusScheduled'), color: 'var(--muted)' };
-    if (near(chargingStatus, 0.3)) return { label: t('car.chargingStatusWaiting'), color: '#ff9f0a' };
+    if (near(chargingStatus, 0.3)) return { label: t('car.chargingStatusWaiting'), color: 'var(--warning)' };
     if (near(chargingStatus, -1.0)) return { label: t('car.chargingStatusError'), color: 'var(--danger)' };
     if (near(chargingStatus, -1.1)) return { label: t('car.chargingStatusUnavailable'), color: 'var(--muted)' };
     return { label: t('car.chargingStatusNotCharging'), color: 'var(--muted)' };
@@ -74,17 +74,16 @@ export function CarStatus({ soc, minSoc, skipAboveSoc, socTarget, batteryAutonom
   })();
 
   return (
-    <div className="card car-status-card">
-      <h2>{t('car.heading')}</h2>
+    <section className="card car-status-card">
+      <div className="card-head">
+        <h2>{t('car.heading')}</h2>
+        {hasData && <span className="card-aside car-soc num">{soc.toFixed(0)}%</span>}
+      </div>
 
-      <div className="soc-display">
-        <div className="soc-bar-container">
-          <div className="soc-bar" style={{ width: `${Math.min(100, Math.max(0, soc))}%`, background: barColor }}>
-            <span className="soc-bar-text">{soc.toFixed(0)}%</span>
-          </div>
-          {minSoc > 0 && <div className="soc-threshold soc-min" style={{ left: `${minSoc}%` }} title={t('car.minSoc', { value: minSoc })} />}
-          {skipAboveSoc > 0 && <div className="soc-threshold soc-skip" style={{ left: `${skipAboveSoc}%` }} title={t('car.skipAbove', { value: skipAboveSoc })} />}
-        </div>
+      <div className="soc-bar-container" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(soc)} aria-valuetext={`${soc.toFixed(0)}%`} aria-label="SoC">
+        <div className="soc-bar" style={{ width: `${Math.min(100, Math.max(0, soc))}%`, background: barColor }} />
+        {minSoc > 0 && <div className="soc-threshold soc-min" style={{ left: `${minSoc}%` }} title={t('car.minSoc', { value: minSoc })} />}
+        {safeSoc > 0 && <div className="soc-threshold soc-skip" style={{ left: `${safeSoc}%` }} title={t('car.safeSoc', { value: safeSoc })} />}
       </div>
 
       {hasData ? (
@@ -100,45 +99,27 @@ export function CarStatus({ soc, minSoc, skipAboveSoc, socTarget, batteryAutonom
               {vehicleModel && <span className="car-model-name">{vehicleModel}</span>}
             </div>
           )}
-          <div className="car-details">
+          <dl className="stat-list car-details">
             {!showImage && vehicleModel && (
-              <div className="car-detail">
-                <span className="muted">{t('car.vehicle')}</span>
-                <span>{vehicleModel}</span>
-              </div>
+              <div><dt>{t('car.vehicle')}</dt><dd>{vehicleModel}</dd></div>
             )}
-            <div className="car-detail">
-              <span className="muted">{t('car.range')}</span>
-              <span>{batteryAutonomy} km</span>
-            </div>
+            <div><dt>{t('car.range')}</dt><dd className="num">{batteryAutonomy} km</dd></div>
             {mileage != null && mileage > 0 && (
-              <div className="car-detail">
-                <span className="muted">{t('car.mileage')}</span>
-                <span>{Math.round(mileage).toLocaleString()} km</span>
-              </div>
+              <div><dt>{t('car.mileage')}</dt><dd className="num">{Math.round(mileage).toLocaleString()} km</dd></div>
             )}
-            <div className="car-detail">
-              <span className="muted">{t('car.charging')}</span>
-              <span style={{ color: charging.color }}>{charging.label}</span>
-            </div>
-            <div className="car-detail">
-              <span className="muted">{t('car.plug')}</span>
-              <span style={{ color: plug.color }}>{plug.label}</span>
-            </div>
+            <div><dt>{t('car.charging')}</dt><dd style={{ color: charging.color }}>{charging.label}</dd></div>
+            <div><dt>{t('car.plug')}</dt><dd style={{ color: plug.color }}>{plug.label}</dd></div>
             {near(chargingStatus, 1.0) && remaining && (
-              <div className="car-detail">
-                <span className="muted">{t('car.remaining')}</span>
-                <span>{remaining}</span>
-              </div>
+              <div><dt>{t('car.remaining')}</dt><dd className="num">{remaining}</dd></div>
             )}
-          </div>
+          </dl>
         </div>
       ) : (
-        <p className="muted">{t('car.noData')}</p>
+        <p className="muted empty">{t('car.noData')}</p>
       )}
 
       {hasData && <SocLimitControl socTarget={socTarget} onChange={onSocTargetChange} />}
-    </div>
+    </section>
   );
 }
 
@@ -154,7 +135,7 @@ function SocLimitControl({ socTarget, onChange }: { socTarget: number; onChange:
   const dirtyRef = useRef(false); // user is mid-edit; don't clobber with prop syncs
   const lastSentRef = useRef<number>(clampLimit(socTarget));
 
-  // Reflect the live car value when it changes — but only while the user isn't
+  // Reflect the live car value when it changes, but only while the user isn't
   // actively editing, so a background status refresh can't yank the input.
   useEffect(() => {
     if (!dirtyRef.current) {
@@ -238,6 +219,7 @@ function SocLimitControl({ socTarget, onChange }: { socTarget: number; onChange:
           <input
             type="number"
             inputMode="numeric"
+            aria-label={t('car.chargeLimit')}
             value={text}
             min={SOC_MIN}
             max={SOC_MAX}

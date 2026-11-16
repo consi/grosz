@@ -14,7 +14,9 @@ grosz glues together three things that don't natively talk to each other:
 - **MyEnergi Zappi2**: your home EV charger. grosz drives it as an OCPP 1.6J central system, setting the charging profile, starting and stopping sessions, and reading meter values.
 - **Renault EV (MyRenault / Kamereon)**: optional. grosz polls your car's State of Charge, range, and plug status so it knows when (and how much) to charge.
 
-Once an hour grosz takes all of that and schedules charging into the cheapest hourly slots that will still hit your target SoC by your deadline. It then pushes a `TxDefaultProfile` to the Zappi over OCPP. The schedule shows up overlaid on the price chart, you can override it with a forced-charge window, and every decision is logged so you can later check why it did or didn't charge.
+grosz keeps the car at its normal target (80%) as cheaply as it can. Below a safe threshold (default 50%) it reaches the target before your departure time; above it, it may wait up to a day for cheaper known hours (next-day prices arrive around noon). Negative prices always charge (most negative hours first), very cheap hours (default at or below 0.45 PLN/kWh) may fill above the target, and below a floor (default 15%) it charges immediately. It only plans on hours when the car is usually plugged in (learned from the last 28 days). Raising the car's limit (or the Trip action) means "be ready by then"; the limit returns to normal after the trip unplug.
+
+The plan is pushed to the Zappi as one `TxDefaultProfile`: full power in planned blocks and 0 W in between, so a plugged-in car is paused between blocks instead of having its transaction stopped (Zappi needs a re-plug to start again after a stop). Profiles are written only when the plan changes and under a strict budget, because Zappi accepts at most 24 profile writes per hour. The plan shows up on the price chart, you can force or block any hour, and every decision is logged.
 
 ## Why two public vhosts
 
@@ -33,7 +35,7 @@ Splitting the UI and the OCPP endpoint onto separate hostnames keeps the protoco
 
 ## Features
 
-- Cheapest-hour scheduling against the Pstryk dynamic tariff, refreshed each hour
+- Target-SoC planning against the Pstryk dynamic tariff: safe-threshold waiting, negative-price ranking, cheap fill, trips
 - Forced-charge windows that bypass the optimiser when you need to leave early
 - Live SoC, range, and plug status from MyRenault / Kamereon
 - Zappi quirks handled for you: commercial-mode reset, single `TxDefaultProfile`, virtual ID tags, meter-interval setup
@@ -251,13 +253,13 @@ Visit `https://grosz.example.com` and log in with the default `admin` / `admin`.
 2. Enter your Pstryk.pl API token
 3. (Optional) Enter MyRenault credentials for SoC integration
 4. Set the OCPP authorisation key to match what you configured on the Zappi
-5. Set scheduler parameters: target SoC, deadline, maximum charge power, skip threshold
+5. Set planner parameters: target SoC, departure time, safe threshold, floor, cheap-fill price, maximum charge power
 
 That's it. grosz pulls the next price window and schedules the cheapest hours automatically.
 
 Drag across the price chart to zoom into an hour or a range of hours, then use the calendar/charging icon at its top right to schedule the visible period. Confirm the start and end in the configured display timezone. Custom windows always use the configured maximum charging power.
 
-In the schedule panel, edit or delete automatic periods, manage pinned windows, and restore blocked periods. Deleting a period blocks that time; unpinning a custom window returns it to automatic scheduling. Scheduling an overlapping range replaces earlier instructions inside the selection and preserves the portions outside it. **Cancel everything** clears all windows, blocks, and previous cancellations, then pauses automatic scheduling. You can still add manual windows; choose **Resume automatic scheduling** to enable optimization again. Edits save atomically and scheduler updates are debounced for five seconds. During an open charging transaction, the running schedule stays frozen and window changes wait until the transaction ends. Schedule cancellation is disabled during that session because stopping may require physically reconnecting the car.
+In the schedule panel, edit or delete automatic periods, manage pinned windows, and restore blocked periods. Deleting a period blocks that time; unpinning a custom window returns it to automatic scheduling. Scheduling an overlapping range replaces earlier instructions inside the selection and preserves the portions outside it. **Cancel everything** clears all windows, blocks, and previous cancellations, then pauses automatic scheduling. You can still add manual windows; choose **Resume automatic scheduling** to enable optimization again. Edits save atomically and scheduler updates are debounced for five seconds. Manual windows apply immediately, also during an open charging transaction: a blocked hour pauses the session through the charging profile rather than stopping it. Cancelling the whole schedule is disabled during a session because stopping may require physically reconnecting the car.
 
 For dependency maintenance, `python3 scripts/update-dependencies.py` selects stable versions at least five days old, retaining the supported TypeScript/Babel versions. Run the printed `npm update --before=...` command in `web`, then `go mod tidy`, `make test`, and `cd web && npm test && npm run lint && npm run build`.
 
@@ -266,7 +268,7 @@ For dependency maintenance, `python3 scripts/update-dependencies.py` selects sta
 - **OCPP 1.6J** central system on `:8887`, built on [`lorenzodonini/ocpp-go`](https://github.com/lorenzodonini/ocpp-go). The Zappi connects via the MyEnergi cloud OCPP proxy.
 - **Web UI** on `:3000`. React + Vite SPA, embedded into the Go binary via `go:embed`. SSE for live updates.
 - **Persistence**: pure-Go SQLite (`modernc.org/sqlite`, no CGO) for settings, OCPP events, sessions, tariff cache.
-- **Tariff**: Pstryk.pl REST API. Prices cached locally; the scheduler picks the cheapest hours that satisfy the charge target.
+- **Tariff**: Pstryk.pl REST API. Prices cached locally; the planner picks the cheapest usable hours that satisfy the charge target.
 - **Vehicle SoC (optional)**: MyRenault / Kamereon API, polled to drive charge-target awareness.
 
 A pre-built container image is also published at `ghcr.io/consi/grosz` if you'd rather containerise.

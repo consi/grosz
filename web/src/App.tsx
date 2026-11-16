@@ -9,6 +9,7 @@ import { Sessions } from './components/Sessions';
 import { OcppLog } from './components/OcppLog';
 import { SystemLog } from './components/SystemLog';
 import { Settings } from './components/Settings';
+import { ModeControl, StatusPill } from './components/ModeControl';
 import { VersionUpdateBanner } from './components/VersionUpdateBanner';
 import { RenaultReauthBanner } from './components/RenaultReauthBanner';
 import { useSSE } from './hooks/useSSE';
@@ -17,6 +18,7 @@ import { I18nProvider, useTranslation, browserLocale } from './i18n';
 import type { Locale, TranslationKey } from './i18n';
 import type { StatusResponse, Rate, HourlyEnergy, MeterLive } from './types';
 import type { SaveOverride, DeleteOverride, MutationResult } from './utils/schedule';
+import { publishOcpp } from './utils/ocppBus';
 import './App.css';
 
 type Tab = 'dashboard' | 'reporting' | 'log' | 'syslog' | 'settings';
@@ -56,7 +58,7 @@ function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [passkeysAvailable, setPasskeysAvailable] = useState(false);
   const [tab, setTab] = useState<Tab>(tabFromHash);
-  const [status, setStatus] = useState<StatusResponse>({ chargePoints: [], charging: false, mode: 'schedule', soc: 0, minSoc: 0, skipAboveSoc: 0, socTarget: 0, deadlineTime: '07:00', batteryAutonomy: 0, chargingStatus: 0, plugStatus: 0, chargingRemainingTime: 0 });
+  const [status, setStatus] = useState<StatusResponse>({ chargePoints: [], charging: false, mode: 'schedule', soc: 0, minSoc: 0, safeSoc: 0, socTarget: 0, normalTarget: 0, departureTime: '07:00', batteryAutonomy: 0, chargingStatus: 0, plugStatus: 0, chargingRemainingTime: 0 });
   const [rates, setRates] = useState<Rate[]>([]);
   const [consumption, setConsumption] = useState<HourlyEnergy[]>([]);
   const [meterLive, setMeterLive] = useState<MeterLive | null>(null);
@@ -114,7 +116,7 @@ function App() {
 
   // Check auth on mount. Only treat 401 as "not authenticated"; transient
   // proxy errors (502/503 during a deploy) and network errors must not kick
-  // the user — keep retrying until we get a definitive answer.
+  // the user; keep retrying until we get a definitive answer.
   useEffect(() => {
     let cancelled = false;
     const check = async (): Promise<void> => {
@@ -132,7 +134,7 @@ function App() {
           setPasskeysAvailable(data.passkeys === true);
           return;
         }
-        // 5xx / non-2xx-non-401 — backend restarting; retry shortly.
+        // 5xx / non-2xx-non-401: backend restarting, retry shortly.
         setTimeout(check, 2000);
       } catch {
         if (cancelled) return;
@@ -212,6 +214,7 @@ function App() {
         if (event === 'status') { statusRequest.current++; setStatus(parsed); }
         if (event === 'rates') setRates(parsed.rates || []);
         if (event === 'meter') setMeterLive(parsed);
+        if (event === 'ocpp') publishOcpp(parsed);
       } catch { /* ignore */ }
     }, []),
     useCallback(() => setAuthed(false), []),
@@ -338,6 +341,8 @@ function App() {
     `/api/schedule/overrides${id === undefined ? '' : `/${id}`}`, id === undefined ? 'POST' : 'PUT', payload,
   );
   const handleDeleteOverride: DeleteOverride = (id) => mutateSchedule(`/api/schedule/overrides/${id}`, 'DELETE');
+  const handleTripStart = (target: number, readyBy: string) => mutateSchedule('/api/trip', 'POST', { target, readyBy });
+  const handleTripCancel = () => mutateSchedule('/api/trip', 'DELETE');
 
   const handleLogout = async () => {
     await fetch('/api/logout', { method: 'POST' });
@@ -379,6 +384,8 @@ function App() {
         onScheduleCancel={handleScheduleCancel}
         onCreateOverride={handleCreateOverride}
         onDeleteOverride={handleDeleteOverride}
+        onTripStart={handleTripStart}
+        onTripCancel={handleTripCancel}
         onLogout={handleLogout}
       />
     </I18nProvider>
@@ -394,7 +401,7 @@ function AppContent({
   versionInfo,
   renaultTfaAutoStart, onRenaultTfaAutoStartConsumed,
   onModeChange, onSocTargetChange, onScheduleApply, onScheduleCancel,
-  onCreateOverride, onDeleteOverride, onLogout,
+  onCreateOverride, onDeleteOverride, onTripStart, onTripCancel, onLogout,
 }: {
   tab: Tab; setTab: (t: Tab) => void;
   scheduleRefreshing: boolean;
@@ -410,6 +417,8 @@ function AppContent({
   onScheduleApply: () => Promise<MutationResult>; onScheduleCancel: () => Promise<MutationResult>;
   onCreateOverride: SaveOverride;
   onDeleteOverride: DeleteOverride;
+  onTripStart: (target: number, readyBy: string) => Promise<MutationResult>;
+  onTripCancel: () => Promise<MutationResult>;
   onLogout: () => void;
 }) {
   const { t } = useTranslation();
@@ -417,16 +426,34 @@ function AppContent({
 
   return (
     <div className="app">
-      <header>
-        <h1 onClick={() => setTab('dashboard')}>grosz</h1>
-        <nav>
-          {TABS.map((ti) => (
-            <button key={ti.id} className={tab === ti.id ? 'active' : ''} onClick={() => setTab(ti.id)}>
-              {t(ti.labelKey)}
-            </button>
-          ))}
-        </nav>
-        <button className="logout-btn" onClick={onLogout}>{t('nav.logout')}</button>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <h1 className="brand">
+            <a href="#dashboard" onClick={(e) => { e.preventDefault(); setTab('dashboard'); }}>grosz</a>
+          </h1>
+          <nav className="topnav" aria-label={t('nav.menu')}>
+            {TABS.map((ti) => (
+              <button
+                key={ti.id}
+                type="button"
+                className={tab === ti.id ? 'active' : ''}
+                aria-current={tab === ti.id ? 'page' : undefined}
+                onClick={() => setTab(ti.id)}
+              >
+                {t(ti.labelKey)}
+              </button>
+            ))}
+          </nav>
+          <div className="topbar-status">
+            <StatusPill chargePoints={status.chargePoints} />
+            <ModeControl className="mode-toggle-header" mode={status.mode || 'schedule'} pendingMode={status.pendingMode} onModeChange={onModeChange} />
+          </div>
+          <button type="button" className="logout-btn" onClick={onLogout} aria-label={t('nav.logout')} title={t('nav.logout')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       {(pulling || refreshing) && (
@@ -434,27 +461,23 @@ function AppContent({
           <div className={`pull-spinner ${refreshing ? 'spinning' : ''}`} style={{ transform: `rotate(${pullDistance * 3}deg)` }}>↻</div>
         </div>
       )}
-      <main style={pulling ? { transform: `translateY(${pullDistance}px)`, transition: 'none' } : undefined}>
+      <main className="main" style={pulling ? { transform: `translateY(${pullDistance}px)`, transition: 'none' } : undefined}>
+        {modeError && <div className="mode-error" role="alert">{modeError}</div>}
         {tab === 'dashboard' && (
-          <div className="dashboard-grid">
-            <div className="dashboard-col">
+          <div className="dashboard">
+            <ModeControl className="mode-toggle-inline" mode={status.mode || 'schedule'} pendingMode={status.pendingMode} onModeChange={onModeChange} />
+            <div className="dash-charger">
               <ChargerStatus
                 chargePoints={status.chargePoints}
                 schedule={status.schedule}
                 charging={status.charging}
-                mode={status.mode || 'schedule'}
-                pendingMode={status.pendingMode}
-                onModeChange={onModeChange}
-                error={modeError}
               />
-              <PriceChart rates={rates} schedule={status.schedule} consumption={consumption} markers={chartMarkers} timezone={timezone} onCreateOverride={onCreateOverride} sessionActive={sessionActive} />
             </div>
-            <div className="dashboard-col">
-              <GridStatus data={meterLive} />
+            <div className="dash-car">
               <CarStatus
                 soc={status.soc}
                 minSoc={status.minSoc}
-                skipAboveSoc={status.skipAboveSoc}
+                safeSoc={status.safeSoc}
                 socTarget={status.socTarget}
                 batteryAutonomy={status.batteryAutonomy}
                 chargingStatus={status.chargingStatus}
@@ -466,11 +489,25 @@ function AppContent({
                 mileage={status.mileage}
                 onSocTargetChange={onSocTargetChange}
               />
+            </div>
+            <div className="dash-grid">
+              <GridStatus data={meterLive} />
+            </div>
+            <div className="dash-chart">
+              <PriceChart rates={rates} schedule={status.schedule} consumption={consumption} markers={chartMarkers} timezone={timezone} overrides={status.overrides || []} onCreateOverride={onCreateOverride} onDeleteOverride={onDeleteOverride} sessionActive={sessionActive} />
+            </div>
+            <div className="dash-schedule">
               <ScheduleForm
                 schedule={status.schedule}
                 refreshing={scheduleRefreshing}
                 sessionActive={sessionActive}
                 overrides={status.overrides || []}
+                plan={{
+                  mode: status.planMode, soc: status.soc, safeSoc: status.safeSoc, minSoc: status.minSoc,
+                  normalTarget: status.normalTarget, socTarget: status.socTarget,
+                  tripReadyBy: status.tripReadyBy, departureTime: status.departureTime,
+                  tripActive: status.tripActive, fillActive: status.fillActive,
+                }}
                 skipReason={status.skipReason}
                 skipReasonKey={status.skipReasonKey}
                 skipReasonParams={status.skipReasonParams}
@@ -478,15 +515,17 @@ function AppContent({
                 onCancel={onScheduleCancel}
                 onCreateOverride={onCreateOverride}
                 onDeleteOverride={onDeleteOverride}
+                onTripStart={onTripStart}
+                onTripCancel={onTripCancel}
                 timezone={timezone}
-                      />
+              />
             </div>
           </div>
         )}
         {tab === 'reporting' && <Sessions refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'log' && <OcppLog refreshKey={refreshKey} timezone={timezone} />}
         {tab === 'syslog' && <SystemLog refreshKey={refreshKey} timezone={timezone} />}
-        {tab === 'settings' && <Settings refreshKey={refreshKey} locale={locale} onLocaleChange={setLocale} renaultTfaAutoStart={renaultTfaAutoStart} onRenaultTfaAutoStartConsumed={onRenaultTfaAutoStartConsumed} />}
+        {tab === 'settings' && <Settings refreshKey={refreshKey} chargePoints={status.chargePoints} timezone={timezone} locale={locale} onLocaleChange={setLocale} renaultTfaAutoStart={renaultTfaAutoStart} onRenaultTfaAutoStartConsumed={onRenaultTfaAutoStartConsumed} />}
       </main>
       {/* Fixed-position bar: must stay outside <main>, whose pull-to-refresh
           transform would otherwise become its containing block. */}
@@ -516,7 +555,7 @@ function AppFooter({ versionInfo }: { versionInfo: { version: string; commit: st
   const shortBoot = versionInfo.bootId ? versionInfo.bootId.slice(0, 8) : '';
   return (
     <footer className="app-footer">
-      grosz — {t('login.subtitle')} {versionInfo.version} ({versionInfo.commit}/{shortBoot})
+      grosz · {t('login.subtitle')} {versionInfo.version} ({versionInfo.commit}/{shortBoot})
     </footer>
   );
 }
@@ -524,7 +563,7 @@ function AppFooter({ versionInfo }: { versionInfo: { version: string; commit: st
 function DocumentTitle() {
   const { t } = useTranslation();
   useEffect(() => {
-    document.title = `grosz — ${t('login.subtitle')}`;
+    document.title = `grosz · ${t('login.subtitle')}`;
   }, [t]);
   return null;
 }

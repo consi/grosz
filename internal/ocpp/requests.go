@@ -16,7 +16,7 @@ import (
 
 // emitOutboundResult records a system event at info on success or warn on
 // failure, for an outbound OCPP request. Keeps the call sites in this file
-// terse — every request function ends with an `events.emitOutboundResult(...)`
+// terse: every request function ends with an `events.emitOutboundResult(...)`
 // before returning.
 func (s *Server) emitOutboundResult(action events.Action, input map[string]any, err error) {
 	if err != nil {
@@ -218,7 +218,7 @@ func (s *Server) SetChargingProfile(cpID string, connectorID int, profile *types
 		return fmt.Errorf("send SetChargingProfile: %w", err)
 	}
 
-	s.recordEvent("send", cpID, "SetChargingProfile", map[string]any{"connectorId": connectorID})
+	s.recordEvent("send", cpID, "SetChargingProfile", map[string]any{"connectorId": connectorID, "csChargingProfiles": profile})
 
 	select {
 	case err = <-rc:

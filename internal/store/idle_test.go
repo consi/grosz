@@ -10,7 +10,7 @@ import (
 
 // fixedDay returns the UTC midnight of a fixed reference date used by these
 // tests. Choosing a past day keeps SnapshotDailyIdle's "clip to now" guard
-// out of the way — it only kicks in for today.
+// out of the way: it only kicks in for today.
 func fixedDay() time.Time {
 	return time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
 }
@@ -93,7 +93,7 @@ func TestSnapshotDailyIdle_PartialDaySession(t *testing.T) {
 	seedMeter(t, s, day, 0, 23000) // 1 kWh per hour
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 
-	// Session 06:00-12:00 — six hours in the middle.
+	// Session 06:00-12:00: six hours in the middle.
 	start := day.Add(6 * time.Hour)
 	stop := day.Add(12 * time.Hour)
 	require.NoError(t, s.StartSession(Session{
@@ -120,7 +120,7 @@ func TestSnapshotDailyIdle_OverlappingSessions(t *testing.T) {
 	seedMeter(t, s, day, 0, 23000)
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 
-	// Two sessions that overlap: 06-10 and 09-14 — merged to 06-14.
+	// Two sessions that overlap: 06-10 and 09-14: merged to 06-14.
 	require.NoError(t, s.StartSession(Session{
 		ChargeBox: "CP", ConnectorID: 1, TransactionID: 1,
 		StartTime: day.Add(6 * time.Hour),
@@ -147,7 +147,7 @@ func TestSnapshotDailyIdle_StraddlesMidnight(t *testing.T) {
 	seedMeter(t, s, day, 0, 23000)
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 
-	// Session spans yesterday 22:00 through today 04:00 — only the first
+	// Session spans yesterday 22:00 through today 04:00, only the first
 	// 4 hours of "today" should be subtracted.
 	require.NoError(t, s.StartSession(Session{
 		ChargeBox: "CP", ConnectorID: 1, TransactionID: 1,
@@ -189,7 +189,7 @@ func TestSnapshotDailyIdle_ActiveSessionToday(t *testing.T) {
 	}))
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 
-	// Active session running for the past 3h — clipped to dayStart..now.
+	// Active session running for the past 3h: clipped to dayStart..now.
 	require.NoError(t, s.StartSession(Session{
 		ChargeBox: "CP", ConnectorID: 1, TransactionID: 99,
 		StartTime: now.Add(-3 * time.Hour),
@@ -211,7 +211,7 @@ func TestSnapshotDailyIdle_NoMeterRowsPreservesExisting(t *testing.T) {
 	// Pre-existing snapshot.
 	require.NoError(t, s.UpsertDailyIdle("2026-04-15", 7.5, 4.2))
 
-	// No meter readings inserted for the day — snapshot must be a no-op.
+	// No meter readings inserted for the day: snapshot must be a no-op.
 	require.NoError(t, s.SnapshotDailyIdle(day))
 
 	rows, err := s.DailyIdleByDateRange(day, day.Add(24*time.Hour))
@@ -242,7 +242,7 @@ func TestSnapshotDailyIdle_CostMatchesPerWindowSum(t *testing.T) {
 	}
 	require.NoError(t, s.SaveRates("pstryk", rates))
 
-	// Session 10-14 — straddles the rate boundary, so a price-aware
+	// Session 10-14: straddles the rate boundary, so a price-aware
 	// per-window cost matters.
 	require.NoError(t, s.StartSession(Session{
 		ChargeBox: "CP", ConnectorID: 1, TransactionID: 1,
@@ -311,7 +311,7 @@ func TestRebuildDailyIdle_PartialDaySession(t *testing.T) {
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 	seedPstryk(t, s, day, 24, 1000) // 1 kWh/hour, 24 kWh total
 
-	// Session 06:00-12:00 — six hours.
+	// Session 06:00-12:00: six hours.
 	require.NoError(t, s.StartSession(Session{
 		ChargeBox: "CP", ConnectorID: 1, TransactionID: 1,
 		StartTime: day.Add(6 * time.Hour),
@@ -332,7 +332,7 @@ func TestRebuildDailyIdle_OverwritesPartialSnapshot(t *testing.T) {
 	day := fixedDay()
 	seedRate(t, s, day, day.Add(24*time.Hour), 1.0)
 
-	// Stale snapshot from before downtime — only 3 kWh recorded.
+	// Stale snapshot from before downtime, only 3 kWh recorded.
 	require.NoError(t, s.UpsertDailyIdle("2026-04-15", 3.0, 1.5))
 
 	// Pstryk backfill brought in the full day's data.
@@ -386,14 +386,14 @@ func TestHourlyConsumption_FallsBackToMeter(t *testing.T) {
 	day := now.Add(-12 * time.Hour)
 	seedMeter(t, s, day, 0, 12000) // 12h ramp; some readings fall within last 48h
 
-	// No pstryk_consumption rows — fall back to aggregating meter_readings.
+	// No pstryk_consumption rows: fall back to aggregating meter_readings.
 	got, err := s.HourlyConsumption(48)
 	require.NoError(t, err)
 	require.NotEmpty(t, got, "meter fallback should produce hourly rows")
 }
 
 func TestNonChargingWindows_InversionMath(t *testing.T) {
-	// Direct unit test of the helper — gives us precise coverage on the
+	// Direct unit test of the helper: gives us precise coverage on the
 	// merge/invert edge cases without going through SQL.
 	day := fixedDay()
 	end := day.Add(24 * time.Hour)

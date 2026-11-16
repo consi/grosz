@@ -149,7 +149,7 @@ func TestGetLocationBestEffort403(t *testing.T) {
 
 // TestPushABRPEndToEnd exercises the assembly chain: fresh battery status plus
 // the best-effort cached climate/GPS/odometer, capacity from settings, telemetry
-// assembly, and the ABRP send. hvac/location are no longer fetched by the push —
+// assembly, and the ABRP send. hvac/location are no longer fetched by the push:
 // they are supplied from the cache the soc-level tier maintains.
 func TestPushABRPEndToEnd(t *testing.T) {
 	var gotTLM string

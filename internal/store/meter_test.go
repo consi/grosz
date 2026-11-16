@@ -11,7 +11,7 @@ import (
 // InsertChartMarker takes an explicit timestamp so a stop marker can match the
 // actual stop time (OCPP timestamp / status_at), not the moment we got around
 // to inserting. The timestamp must be recent enough to fall within the
-// RecentChartMarkers window (48h here) — truncated to second precision so the
+// RecentChartMarkers window (48h here): truncated to second precision so the
 // RFC3339 round-trip is exact.
 func TestInsertChartMarker_UsesGivenTimestamp(t *testing.T) {
 	s := testStore(t)

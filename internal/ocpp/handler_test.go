@@ -25,6 +25,7 @@ func testServer(t *testing.T) *Server {
 	t.Cleanup(func() { _ = st.Close() })
 
 	s := NewServer(st, log)
+	s.finalizeDelay = 0 // finalize synchronously in tests
 	// Pre-create the charge point so handlers find it
 	s.mu.Lock()
 	s.points["CP001"] = NewChargePoint("CP001")
@@ -139,7 +140,7 @@ func TestOnAuthorize(t *testing.T) {
 }
 
 // SuspendedEV must finalize the active session in the DB so it appears in
-// reports — Zappi keeps the OCPP transaction open until unplug.
+// reports: Zappi keeps the OCPP transaction open until unplug.
 func TestOnStatusNotification_SuspendedEVFinalizesSession(t *testing.T) {
 	s := testServer(t)
 
@@ -149,7 +150,7 @@ func TestOnStatusNotification_SuspendedEVFinalizesSession(t *testing.T) {
 	txnID := startConf.TransactionId
 
 	mvReq := &core.MeterValuesRequest{
-		ConnectorId: 1,
+		ConnectorId:   1,
 		TransactionId: &txnID,
 		MeterValue: []types.MeterValue{{
 			Timestamp: types.NewDateTime(time.Now()),
@@ -170,7 +171,7 @@ func TestOnStatusNotification_SuspendedEVFinalizesSession(t *testing.T) {
 	_, err = s.OnStatusNotification("CP001", statusReq)
 	require.NoError(t, err)
 
-	// Active session should now be nil — it was completed.
+	// Active session should now be nil: it was completed.
 	active, err := s.store.ActiveSession()
 	require.NoError(t, err)
 	assert.Nil(t, active, "session should be finalized after SuspendedEV")
@@ -195,17 +196,112 @@ func TestOnStatusNotification_SuspendedEVFinalizesSession(t *testing.T) {
 	assert.Equal(t, 1, stopCount, "expected exactly one stop marker")
 }
 
-// SuspendedEVSE means the charger paused (e.g. grid request). Same finalize
-// path, same marker emission.
-func TestOnStatusNotification_SuspendedEVSE_EmitsStopMarkerAndFinalizes(t *testing.T) {
+// SuspendedEVSE is the charger obeying a zero-power profile period: a
+// planned pause inside one transaction. The session must stay open.
+func TestOnStatusNotification_SuspendedEVSE_KeepsSessionOpen(t *testing.T) {
 	s := testServer(t)
-	assertStopStatusFinalizes(t, s, core.ChargePointStatusSuspendedEVSE)
+	assertStatusKeepsSessionOpen(t, s, core.ChargePointStatusSuspendedEVSE)
 }
 
-// Finishing happens during normal session wind-down.
-func TestOnStatusNotification_Finishing_EmitsStopMarkerAndFinalizes(t *testing.T) {
+// Finishing is followed by StopTransaction, which is authoritative.
+func TestOnStatusNotification_Finishing_KeepsSessionOpen(t *testing.T) {
 	s := testServer(t)
-	assertStopStatusFinalizes(t, s, core.ChargePointStatusFinishing)
+	assertStatusKeepsSessionOpen(t, s, core.ChargePointStatusFinishing)
+}
+
+func assertStatusKeepsSessionOpen(t *testing.T, s *Server, status core.ChargePointStatus) {
+	t.Helper()
+	startConf, err := s.OnStartTransaction("CP001", core.NewStartTransactionRequest(1, "garaz", 0,
+		types.NewDateTime(time.Now().Add(-1*time.Hour))))
+	require.NoError(t, err)
+	txnID := startConf.TransactionId
+	_, err = s.OnMeterValues("CP001", energyMV(txnID, "5000"))
+	require.NoError(t, err)
+	_, err = s.OnStatusNotification("CP001", core.NewStatusNotificationRequest(1, core.NoError, status))
+	require.NoError(t, err)
+	active, err := s.store.ActiveSession()
+	require.NoError(t, err)
+	require.NotNil(t, active, "%s must not finalize the session", status)
+}
+
+func energyMV(txnID int, wh string) *core.MeterValuesRequest {
+	return &core.MeterValuesRequest{
+		ConnectorId:   1,
+		TransactionId: &txnID,
+		MeterValue: []types.MeterValue{{
+			Timestamp: types.NewDateTime(time.Now()),
+			SampledValue: []types.SampledValue{
+				{Value: wh, Measurand: types.MeasurandEnergyActiveImportRegister, Unit: types.UnitOfMeasureWh},
+			},
+		}},
+	}
+}
+
+// Regression (txn 96, 2026-11-15): a transient SuspendedEV seconds after a
+// new start finalized the session with the PREVIOUS transaction's energy
+// register (24.8 kWh), and the real StopTransaction (9.36 kWh) was dropped.
+func TestStaleRegisterFromPreviousTxnIsNotUsed(t *testing.T) {
+	s := testServer(t)
+	c1, err := s.OnStartTransaction("CP001", core.NewStartTransactionRequest(1, "garaz", 0, types.NewDateTime(time.Now().Add(-3*time.Hour))))
+	require.NoError(t, err)
+	_, err = s.OnMeterValues("CP001", energyMV(c1.TransactionId, "24845"))
+	require.NoError(t, err)
+	_, err = s.OnStopTransaction("CP001", &core.StopTransactionRequest{TransactionId: c1.TransactionId, MeterStop: 24845, Timestamp: types.NewDateTime(time.Now().Add(-2 * time.Hour))})
+	require.NoError(t, err)
+
+	c2, err := s.OnStartTransaction("CP001", core.NewStartTransactionRequest(1, "garaz", 0, types.NewDateTime(time.Now().Add(-time.Hour))))
+	require.NoError(t, err)
+	// Transient SuspendedEV before any MeterValues for txn 2.
+	_, err = s.OnStatusNotification("CP001", core.NewStatusNotificationRequest(1, core.NoError, core.ChargePointStatusSuspendedEV))
+	require.NoError(t, err)
+	active, err := s.store.ActiveSession()
+	require.NoError(t, err)
+	require.NotNil(t, active, "no reading for txn 2 yet → must not finalize with txn 1's register")
+
+	_, err = s.OnStopTransaction("CP001", &core.StopTransactionRequest{TransactionId: c2.TransactionId, MeterStop: 9360, Timestamp: types.NewDateTime(time.Now())})
+	require.NoError(t, err)
+	sessions, err := s.store.SessionHistory(10, 0)
+	require.NoError(t, err)
+	assert.InDelta(t, 9.36, sessions[0].Energy, 0.001)
+}
+
+// Regression (txn 95, 2026-11-15): provisional finalize at 0.01 kWh must be
+// corrected by the later authoritative StopTransaction (24.8 kWh at unplug).
+func TestStopTransactionCorrectsProvisionalFinalize(t *testing.T) {
+	s := testServer(t)
+	c, err := s.OnStartTransaction("CP001", core.NewStartTransactionRequest(1, "garaz", 0, types.NewDateTime(time.Now().Add(-5*time.Hour))))
+	require.NoError(t, err)
+	_, err = s.OnMeterValues("CP001", energyMV(c.TransactionId, "10"))
+	require.NoError(t, err)
+	_, err = s.OnStatusNotification("CP001", core.NewStatusNotificationRequest(1, core.NoError, core.ChargePointStatusSuspendedEV))
+	require.NoError(t, err)
+	active, _ := s.store.ActiveSession()
+	require.Nil(t, active, "provisionally finalized")
+
+	_, err = s.OnStopTransaction("CP001", &core.StopTransactionRequest{TransactionId: c.TransactionId, MeterStop: 24845, Timestamp: types.NewDateTime(time.Now())})
+	require.NoError(t, err)
+	sessions, err := s.store.SessionHistory(10, 0)
+	require.NoError(t, err)
+	assert.InDelta(t, 24.845, sessions[0].Energy, 0.001)
+}
+
+// With the production delay, a transient SuspendedEV that clears before the
+// delay elapses must not finalize anything.
+func TestTransientSuspendedEVIsDebounced(t *testing.T) {
+	s := testServer(t)
+	s.finalizeDelay = 50 * time.Millisecond
+	c, err := s.OnStartTransaction("CP001", core.NewStartTransactionRequest(1, "garaz", 0, types.NewDateTime(time.Now().Add(-time.Minute))))
+	require.NoError(t, err)
+	_, err = s.OnMeterValues("CP001", energyMV(c.TransactionId, "10"))
+	require.NoError(t, err)
+	_, err = s.OnStatusNotification("CP001", core.NewStatusNotificationRequest(1, core.NoError, core.ChargePointStatusSuspendedEV))
+	require.NoError(t, err)
+	_, err = s.OnStatusNotification("CP001", core.NewStatusNotificationRequest(1, core.NoError, core.ChargePointStatusCharging))
+	require.NoError(t, err)
+	time.Sleep(150 * time.Millisecond)
+	active, err := s.store.ActiveSession()
+	require.NoError(t, err)
+	require.NotNil(t, active)
 }
 
 // Faulted during an active charge must still finalize (and be visible on chart)
@@ -263,7 +359,7 @@ func assertStopStatusFinalizes(t *testing.T, s *Server, status core.ChargePointS
 
 // After a websocket reconnect the in-memory ChargePoint is replaced. Even
 // without measurements pre-loaded, the finalize path must still close the
-// session — by reading the txn from connector_state and the energy from the
+// session: by reading the txn from connector_state and the energy from the
 // fallback in ocpp_events. This is the bug that left session #11 stranded.
 func TestFinalize_AfterWSReconnect_StillFinalizes(t *testing.T) {
 	s := testServer(t)
@@ -326,7 +422,7 @@ func TestFinalize_AfterWSReconnect_StillFinalizes(t *testing.T) {
 }
 
 // Available -> SuspendedEV with no charging in between (no active txn) must
-// not emit a "stop" marker — there's nothing to stop.
+// not emit a "stop" marker: there's nothing to stop.
 func TestOnStatusNotification_StopFromAvailable_NoStopMarker(t *testing.T) {
 	s := testServer(t)
 
@@ -374,7 +470,7 @@ func TestOnStatusNotification_RepeatedSuspendedEV_OneStopMarker(t *testing.T) {
 	statusReq.Timestamp = types.NewDateTime(time.Now())
 	_, err = s.OnStatusNotification("CP001", statusReq)
 	require.NoError(t, err)
-	// Same status arriving again — Zappi re-emits SuspendedEV every 25min.
+	// Same status arriving again: Zappi re-emits SuspendedEV every 25min.
 	_, err = s.OnStatusNotification("CP001", statusReq)
 	require.NoError(t, err)
 
@@ -592,12 +688,12 @@ func TestOnDataTransfer(t *testing.T) {
 func TestOnStatusNotification_DuplicateStatusNoChartMarker(t *testing.T) {
 	s := testServer(t)
 
-	// First Available — no prior state, so no marker either way.
+	// First Available, no prior state, so no marker either way.
 	req := core.NewStatusNotificationRequest(1, core.NoError, core.ChargePointStatusAvailable)
 	_, err := s.OnStatusNotification("CP001", req)
 	require.NoError(t, err)
 
-	// Second Available — duplicate. Must not emit "unplug".
+	// Second Available: duplicate. Must not emit "unplug".
 	_, err = s.OnStatusNotification("CP001", req)
 	require.NoError(t, err)
 
@@ -643,7 +739,7 @@ func TestOnStatusNotification_UnplugTransitionEmitsMarker(t *testing.T) {
 	assert.Equal(t, "unplug", markers[0].Type)
 }
 
-// First-ever Available with no prior state must not emit "unplug" — we have
+// First-ever Available with no prior state must not emit "unplug": we have
 // no claim that anything was previously plugged.
 func TestOnStatusNotification_FirstAvailableNoUnplug(t *testing.T) {
 	s := testServer(t)

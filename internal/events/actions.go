@@ -32,22 +32,22 @@ const (
 
 // ocpp
 const (
-	ActionFinalizeSessionOnStop  Action = "finalizeSessionOnStop"
-	ActionChargerConnected       Action = "chargerConnected"
-	ActionChargerDisconnected    Action = "chargerDisconnected"
-	ActionFirmwareStatus         Action = "firmwareStatus"
-	ActionDiagnosticsStatus      Action = "diagnosticsStatus"
-	ActionTransactionStarted     Action = "transactionStarted"
-	ActionTransactionStopped     Action = "transactionStopped"
-	ActionConnectorStatusChanged Action = "connectorStatusChanged"
-	ActionRemoteStartRequested   Action = "remoteStartRequested"
-	ActionRemoteStopRequested    Action = "remoteStopRequested"
-	ActionChargingProfileApplied Action = "chargingProfileApplied"
-	ActionChargingProfileCleared Action = "chargingProfileCleared"
-	ActionResetRequested         Action = "resetRequested"
+	ActionFinalizeSessionOnStop   Action = "finalizeSessionOnStop"
+	ActionChargerConnected        Action = "chargerConnected"
+	ActionChargerDisconnected     Action = "chargerDisconnected"
+	ActionFirmwareStatus          Action = "firmwareStatus"
+	ActionDiagnosticsStatus       Action = "diagnosticsStatus"
+	ActionTransactionStarted      Action = "transactionStarted"
+	ActionTransactionStopped      Action = "transactionStopped"
+	ActionConnectorStatusChanged  Action = "connectorStatusChanged"
+	ActionRemoteStartRequested    Action = "remoteStartRequested"
+	ActionRemoteStopRequested     Action = "remoteStopRequested"
+	ActionChargingProfileApplied  Action = "chargingProfileApplied"
+	ActionChargingProfileCleared  Action = "chargingProfileCleared"
+	ActionResetRequested          Action = "resetRequested"
 	ActionFirmwareUpdateRequested Action = "firmwareUpdateRequested"
-	ActionChargerBoot            Action = "chargerBoot"
-	ActionStatusCheckTriggered   Action = "statusCheckTriggered"
+	ActionChargerBoot             Action = "chargerBoot"
+	ActionStatusCheckTriggered    Action = "statusCheckTriggered"
 )
 
 // tariff
@@ -78,10 +78,10 @@ const (
 
 // auth
 const (
-	ActionLogin                 Action = "login"
-	ActionLogout                Action = "logout"
-	ActionCredentialRegistered  Action = "credentialRegistered"
-	ActionCredentialDeleted     Action = "credentialDeleted"
+	ActionLogin                Action = "login"
+	ActionLogout               Action = "logout"
+	ActionCredentialRegistered Action = "credentialRegistered"
+	ActionCredentialDeleted    Action = "credentialDeleted"
 )
 
 // costs
@@ -106,7 +106,8 @@ const (
 
 // zappi
 const (
-	ActionZappiSetup Action = "setup"
+	ActionZappiSetup        Action = "setup"
+	ActionZappiCapabilities Action = "capabilities"
 )
 
 // web (user-initiated runtime actions; settings changes; manual controls)
@@ -115,6 +116,9 @@ const (
 	ActionManualChargeStarted Action = "manualChargeStarted"
 	ActionManualChargeStopped Action = "manualChargeStopped"
 	ActionModeSwitchRequested Action = "modeSwitchRequested"
+	ActionTripSet             Action = "tripSet"
+	ActionOCPPConsoleSend     Action = "ocppConsoleSend"
+	ActionTripCancelled       Action = "tripCancelled"
 )
 
 // app

@@ -14,7 +14,7 @@ import (
 )
 
 // ErrTFANotRequired is returned by StartTFA when accounts.login succeeds
-// without a TFA challenge — the account either has TFA disabled or this device
+// without a TFA challenge: the account either has TFA disabled or this device
 // is still trusted, so no email code is needed.
 var ErrTFANotRequired = errors.New("renault: TFA not required")
 
@@ -24,7 +24,7 @@ const tfaPendingTTL = 10 * time.Minute
 
 // tfaPending holds the short-lived secrets of an in-flight email-TFA
 // verification, carried between StartTFA (sends the code) and CompleteTFA
-// (submits it). These never touch disk — only the resulting login_token does.
+// (submits it). These never touch disk, only the resulting login_token does.
 type tfaPending struct {
 	regToken       string
 	gigyaAssertion string
@@ -94,7 +94,7 @@ func (r *Renault) StartTFA(user, pass string) (string, error) {
 	// We expect login to fail with 403101 (pending TFA) and carry a regToken.
 	session, err := r.gigyaLogin(user, pass)
 	if err == nil {
-		// TFA not enforced (or device already trusted) — just persist & poll.
+		// TFA not enforced (or device already trusted), just persist & poll.
 		r.mu.Lock()
 		r.session = session
 		r.jwt = ""
@@ -213,7 +213,7 @@ func (r *Renault) CompleteTFA(code string) error {
 	r.persistDevice()
 
 	// Mint the durable session with a fresh login that presents the now-trusted
-	// gmid — the same path the poller uses to skip TFA. We deliberately do NOT
+	// gmid: the same path the poller uses to skip TFA. We deliberately do NOT
 	// call accounts.finalizeRegistration: it carries no device context, so Gigya
 	// still treats the regToken as TFA-pending and answers 403101.
 	session, err := r.gigyaLogin(pending.user, pending.pass)
@@ -336,7 +336,7 @@ func (r *Renault) bootstrapDevice() (string, string, error) {
 		ucid = out.UCID
 	}
 	if gmid == "" {
-		return "", "", fmt.Errorf("gigya bootstrap: no gmid (code %d)", out.ErrorCode)
+		return "", "", fmt.Errorf("gigya bootstrap, no gmid (code %d)", out.ErrorCode)
 	}
 	return gmid, ucid, nil
 }
@@ -357,7 +357,7 @@ func (r *Renault) initTFA(regToken string) (string, error) {
 		return "", err
 	}
 	if out.GigyaAssertion == "" {
-		return "", fmt.Errorf("gigya initTFA: no assertion returned")
+		return "", fmt.Errorf("gigya initTFA, no assertion returned")
 	}
 	return out.GigyaAssertion, nil
 }
@@ -376,7 +376,7 @@ func (r *Renault) getTFAEmails(assertion string) (string, string, error) {
 		return "", "", err
 	}
 	if len(out.Emails) == 0 {
-		return "", "", fmt.Errorf("gigya getEmails: no registered TFA email")
+		return "", "", fmt.Errorf("gigya getEmails, no registered TFA email")
 	}
 	return out.Emails[0].ID, out.Emails[0].Obfuscated, nil
 }
@@ -396,7 +396,7 @@ func (r *Renault) sendTFACode(emailID, assertion string) (string, error) {
 		return "", err
 	}
 	if out.PhvToken == "" {
-		return "", fmt.Errorf("gigya sendVerificationCode: no phvToken returned")
+		return "", fmt.Errorf("gigya sendVerificationCode, no phvToken returned")
 	}
 	return out.PhvToken, nil
 }
@@ -416,7 +416,7 @@ func (r *Renault) completeTFAVerification(assertion, phvToken, code string) (str
 		return "", err
 	}
 	if out.ProviderAssertion == "" {
-		return "", fmt.Errorf("gigya completeVerification: no providerAssertion returned")
+		return "", fmt.Errorf("gigya completeVerification, no providerAssertion returned")
 	}
 	return out.ProviderAssertion, nil
 }

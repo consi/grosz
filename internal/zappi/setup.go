@@ -24,6 +24,7 @@ func Setup(srv *ocpp.Server, cpID string, st *store.Store, log *slog.Logger) err
 		current = make(map[string]string)
 	} else {
 		log.Info("current configuration", "keys", len(current))
+		storeCapabilities(st, current)
 		for k, v := range current {
 			log.Debug("config key", "key", k, "value", v)
 		}

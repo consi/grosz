@@ -51,8 +51,8 @@ type pstrykMeterValues struct {
 // Pstryk implements Provider for the Pstryk.pl API.
 type Pstryk struct {
 	store        *store.Store
-	tariffEvents *events.Bound // SourceTariff — pricing events
-	pstrykEvents *events.Bound // SourcePstryk — consumption / backfill events
+	tariffEvents *events.Bound // SourceTariff: pricing events
+	pstrykEvents *events.Bound // SourcePstryk: consumption / backfill events
 	log          *slog.Logger
 	client       *http.Client
 	baseURL      string
@@ -131,7 +131,7 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 	p.wg.Go(func() { p.fetchConsumptionAndStore(ctx) })
 	p.wg.Go(func() { p.liveLoop(ctx) })
 
-	// Use a short interval initially — once rates are loaded, switch to hourly
+	// Use a short interval initially, once rates are loaded, switch to hourly
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	settled := false
@@ -149,7 +149,7 @@ func (p *Pstryk) refreshLoop(ctx context.Context) {
 			p.mu.RUnlock()
 
 			if hasRates && !settled {
-				// Rates loaded — slow down to hourly
+				// Rates loaded: slow down to hourly
 				ticker.Reset(1 * time.Hour)
 				settled = true
 			}
@@ -192,7 +192,7 @@ func (p *Pstryk) fetchAndStore(ctx context.Context) {
 
 	// Filter out placeholder/forecast data for tomorrow
 	beforeCount := len(rates)
-	rates = filterPlaceholders(rates)
+	rates = dropMissingPrices(filterPlaceholders(rates))
 	if len(rates) < beforeCount {
 		p.tariffEvents.Info(events.ActionFilterPlaceholders,
 			map[string]any{"beforeCount": beforeCount},
@@ -306,7 +306,7 @@ func (p *Pstryk) fetch(ctx context.Context, token string) ([]Rate, error) {
 // FetchConsumption returns hourly consumption frames for [start, end). Uses
 // the same unified-metrics endpoint as pricing, but with metrics=meter_values.
 // Frames where neither fae_usage nor meter_values.energy_active_import_register
-// is populated are skipped. Empty result on success is fine — caller checks.
+// is populated are skipped. Empty result on success is fine: caller checks.
 func (p *Pstryk) FetchConsumption(ctx context.Context, start, end time.Time) ([]store.PstrykConsumption, error) {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
 	if token == "" {
@@ -349,7 +349,7 @@ func (p *Pstryk) FetchConsumption(ctx context.Context, start, end time.Time) ([]
 }
 
 // liveRefreshInterval paces the background live-consumption loop. The graph
-// doesn't need to be realtime — a couple of minutes of lag is acceptable and
+// doesn't need to be realtime: a couple of minutes of lag is acceptable and
 // keeps Pstryk API usage modest (~30 cycles/hour, 1-2 requests each).
 const liveRefreshInterval = 2 * time.Minute
 
@@ -357,7 +357,7 @@ const liveRefreshInterval = 2 * time.Minute
 // finished hour shows up within ~liveRefreshInterval of the rollover instead
 // of whenever the hourly backfill tick happens to fire. The in-progress hour
 // itself is NOT available from Pstryk (even is_live frames only grow as hours
-// finalize) — store.HourlyConsumption derives it from local meter readings.
+// finalize): store.HourlyConsumption derives it from local meter readings.
 func (p *Pstryk) liveLoop(ctx context.Context) {
 	ticker := time.NewTicker(liveRefreshInterval)
 	defer ticker.Stop()
@@ -471,7 +471,7 @@ const (
 
 // fetchConsumptionAndStore detects the gap between the latest stored hour and
 // now, pulls Pstryk consumption frames to fill it, upserts them, and triggers
-// a daily-idle rebuild for each affected date. Idempotent — returns quickly
+// a daily-idle rebuild for each affected date. Idempotent: returns quickly
 // when there's nothing new to fetch (steady state during normal operation).
 func (p *Pstryk) fetchConsumptionAndStore(ctx context.Context) {
 	token := p.store.GetDefault("tariff.pstryk_token", "")
@@ -489,7 +489,7 @@ func (p *Pstryk) fetchConsumptionAndStore(ctx context.Context) {
 		}
 		return
 	}
-	// Token present — clear the debounce so a later removal warns again.
+	// Token present: clear the debounce so a later removal warns again.
 	p.mu.Lock()
 	p.noTokenWarnAt = time.Time{}
 	p.mu.Unlock()
@@ -638,7 +638,7 @@ func filterPlaceholders(rates []Rate) []Rate {
 		}
 	}
 	if float64(maxCount)/float64(len(tomorrowRates)) > 0.9 {
-		// Placeholder data — discard tomorrow
+		// Placeholder data: discard tomorrow
 		return todayRates
 	}
 
@@ -657,6 +657,20 @@ func toTariffRates(rates []store.Rate) []Rate {
 	out := make([]Rate, len(rates))
 	for i, r := range rates {
 		out[i] = Rate{Start: r.Start, End: r.End, Price: r.Price}
+	}
+	return dropMissingPrices(out)
+}
+
+// dropMissingPrices removes hours priced at exactly 0. Pstryk returns 0 for
+// hours it has not priced yet (e.g. the first hour after the published
+// window); gross prices include distribution, so a real hour is never 0.
+// Without this the planner treated the placeholder as a free hour.
+func dropMissingPrices(rates []Rate) []Rate {
+	out := rates[:0:0]
+	for _, r := range rates {
+		if r.Price != 0 {
+			out = append(out, r)
+		}
 	}
 	return out
 }

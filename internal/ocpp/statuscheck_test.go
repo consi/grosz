@@ -46,7 +46,7 @@ func (r *triggerRecorder) snapshot() []string {
 	return out
 }
 
-// Stale connector — last_status_notification older than threshold —
+// Stale connector: last_status_notification older than threshold:
 // triggers a StatusNotification.
 func TestStatusChecker_FiresWhenStale(t *testing.T) {
 	c, rec := newCheckerForTest(t, 25*time.Minute)
@@ -73,7 +73,7 @@ func TestStatusChecker_FiresWhenStale(t *testing.T) {
 	assert.Equal(t, []string{"CP001"}, rec.snapshot())
 }
 
-// Fresh connector — last_status_notification within threshold — must NOT trigger.
+// Fresh connector (last_status_notification within threshold) must NOT trigger.
 func TestStatusChecker_SkipsWhenFresh(t *testing.T) {
 	c, rec := newCheckerForTest(t, 25*time.Minute)
 	s := c.s
@@ -98,7 +98,7 @@ func TestStatusChecker_SkipsWhenFresh(t *testing.T) {
 	assert.Empty(t, rec.snapshot(), "fresh state must not trigger")
 }
 
-// Disconnected charge points must be skipped — TriggerMessage can't reach them.
+// Disconnected charge points must be skipped: TriggerMessage can't reach them.
 func TestStatusChecker_SkipsDisconnected(t *testing.T) {
 	c, rec := newCheckerForTest(t, 25*time.Minute)
 	s := c.s
@@ -143,7 +143,7 @@ func TestStatusChecker_FiresWhenNoPersistedState(t *testing.T) {
 	assert.Equal(t, []string{"CP001"}, rec.snapshot())
 }
 
-// Threshold 0 disables the check entirely (defensive — should never happen
+// Threshold 0 disables the check entirely (defensive: should never happen
 // in production since the default is 25 min).
 func TestStatusChecker_ZeroThresholdDisabled(t *testing.T) {
 	c, rec := newCheckerForTest(t, 0)
@@ -198,7 +198,7 @@ func TestStatusChecker_StartStopWhenDisabled(t *testing.T) {
 }
 
 // Cooldown: back-to-back tick()s for a stale CP must only fire once within
-// the threshold window — guards against trigger storms when Zappi never
+// the threshold window: guards against trigger storms when Zappi never
 // answers a TriggerMessage with a fresh StatusNotification.
 func TestStatusChecker_CooldownPreventsRepeatedFires(t *testing.T) {
 	c, rec := newCheckerForTest(t, 25*time.Minute)
@@ -228,7 +228,7 @@ func TestStatusChecker_CooldownPreventsRepeatedFires(t *testing.T) {
 	assert.Equal(t, []string{"CP001"}, rec.snapshot(),
 		"second tick within cooldown must not re-fire")
 
-	// Advance past the cooldown window — a subsequent tick may fire again.
+	// Advance past the cooldown window: a subsequent tick may fire again.
 	timeNow = func() time.Time { return now.Add(26 * time.Minute) }
 	c.tick()
 	waitFor(t, func() bool { return len(rec.snapshot()) >= 2 })
@@ -256,7 +256,7 @@ func TestStatusChecker_TriggerErrorIsLogged(t *testing.T) {
 
 	c.tick()
 	waitFor(t, func() bool { return len(rec.snapshot()) >= 1 })
-	// nothing else to assert — the test passes if tick() didn't panic.
+	// nothing else to assert: the test passes if tick() didn't panic.
 }
 
 func waitFor(t *testing.T, cond func() bool) {

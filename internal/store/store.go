@@ -205,6 +205,13 @@ func (s *Store) migrate() error {
 			energy_wh  REAL NOT NULL,
 			fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+
+		// Plug/unplug transitions, kept long enough to learn when the car is
+		// usually plugged in (weekday x hour pattern used by the planner).
+		`CREATE TABLE IF NOT EXISTS plug_history (
+			timestamp TEXT NOT NULL PRIMARY KEY,
+			plugged   INTEGER NOT NULL
+		)`,
 	}
 
 	for _, m := range migrations {

@@ -251,7 +251,7 @@ func TestPstrykFetchConsumption_SkipsEmptyFrames(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		frames := []map[string]any{
-			// Pricing-only frame — should be skipped.
+			// Pricing-only frame: should be skipped.
 			{
 				"start":   now.Format(time.RFC3339),
 				"end":     now.Add(time.Hour).Format(time.RFC3339),
@@ -326,7 +326,7 @@ func TestPstrykFetchConsumption_HourKeyIsUTC(t *testing.T) {
 }
 
 // TestPstrykRefreshToday_HourFrame: Pstryk returns an hour-resolution frame
-// for the in-progress hour — it lands in the store with the finalized hours.
+// for the in-progress hour: it lands in the store with the finalized hours.
 func TestPstrykRefreshToday_HourFrame(t *testing.T) {
 	currentHour := time.Now().UTC().Truncate(time.Hour)
 
@@ -382,7 +382,7 @@ func TestPstrykRefreshToday_HourFrame(t *testing.T) {
 }
 
 // TestPstrykRefreshToday_FinalizedOnly: Pstryk (as observed in production)
-// returns no frame for the in-progress hour — only finalized hours are
+// returns no frame for the in-progress hour, only finalized hours are
 // stored, and nothing is fabricated for the current hour.
 func TestPstrykRefreshToday_FinalizedOnly(t *testing.T) {
 	currentHour := time.Now().UTC().Truncate(time.Hour)

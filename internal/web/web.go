@@ -120,6 +120,8 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("POST /api/charger/{id}/clear-cache", s.requireAuth(s.handleChargerClearCache))
 	mux.HandleFunc("POST /api/charger/{id}/update-firmware", s.requireAuth(s.handleChargerUpdateFirmware))
 	mux.HandleFunc("POST /api/charger/{id}/maintenance-mode", s.requireAuth(s.handleChargerMaintenanceMode))
+	mux.HandleFunc("POST /api/charger/{id}/ocpp", s.requireAuth(s.handleOCPPConsoleSend))
+	mux.HandleFunc("GET /api/ocpp/console/actions", s.requireAuth(s.handleOCPPConsoleActions))
 	mux.HandleFunc("GET /api/costlog", s.requireAuth(s.handleCostLog))
 	mux.HandleFunc("GET /api/sessions", s.requireAuth(s.handleSessions))
 	mux.HandleFunc("GET /api/sessions/report", s.requireAuth(s.handleSessionReport))
@@ -140,6 +142,8 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("POST /api/renault/tfa/start", s.requireAuth(s.handleRenaultTFAStart))
 	mux.HandleFunc("POST /api/renault/tfa/verify", s.requireAuth(s.handleRenaultTFAVerify))
 	mux.HandleFunc("PUT /api/car/soc-target", s.requireAuth(s.handleSetSocTarget))
+	mux.HandleFunc("POST /api/trip", s.requireAuth(s.handleStartTrip))
+	mux.HandleFunc("DELETE /api/trip", s.requireAuth(s.handleCancelTrip))
 
 	// Static files (SPA)
 	staticFS, err := fs.Sub(staticFiles, "dist")
@@ -230,12 +234,17 @@ func (s *Server) buildStatus() any {
 		PendingModeApplyAt    string                   `json:"pendingModeApplyAt,omitempty"`
 		SoC                   float64                  `json:"soc"`
 		MinSoC                float64                  `json:"minSoc"`
-		SkipAboveSoC          float64                  `json:"skipAboveSoc"`
+		SafeSoC               float64                  `json:"safeSoc"`
 		SocTarget             float64                  `json:"socTarget"`
+		NormalTarget          float64                  `json:"normalTarget"`
+		PlanMode              string                   `json:"planMode,omitempty"`
+		TripReadyBy           string                   `json:"tripReadyBy,omitempty"`
+		TripActive            bool                     `json:"tripActive"` // limit raised by the user (not by a cheap fill)
+		FillActive            bool                     `json:"fillActive"` // limit raised by grosz for a cheap fill
 		SkipReason            string                   `json:"skipReason,omitempty"`
 		SkipReasonKey         string                   `json:"skipReasonKey,omitempty"`
 		SkipReasonParams      map[string]string        `json:"skipReasonParams,omitempty"`
-		DeadlineTime          string                   `json:"deadlineTime"`
+		DepartureTime         string                   `json:"departureTime"`
 		BatteryAutonomy       int                      `json:"batteryAutonomy"`
 		ChargingStatus        float64                  `json:"chargingStatus"`
 		PlugStatus            int                      `json:"plugStatus"`
@@ -263,7 +272,7 @@ func (s *Server) buildStatus() any {
 			cp.Serial = snap.BootInfo.SerialNumber
 			cp.Firmware = snap.BootInfo.FirmwareVersion
 		}
-		// Only expose connector state when the websocket is alive — the
+		// Only expose connector state when the websocket is alive: the
 		// in-memory connectors are hydrated from DB on startup so they would
 		// otherwise carry stale state across the wire.
 		if snap.Connected {
@@ -286,9 +295,11 @@ func (s *Server) buildStatus() any {
 	var sched *scheduler.Schedule
 	var skipReason, skipReasonKey string
 	var skipReasonParams map[string]string
+	var planMode string
 	if s.scheduler != nil {
 		sched = s.scheduler.Schedule()
 		skipReason, skipReasonKey, skipReasonParams = s.scheduler.SkipReason()
+		planMode = s.scheduler.PlanMode()
 	}
 
 	overrides, err := s.store.LoadOverrides(time.Now())
@@ -323,13 +334,18 @@ func (s *Server) buildStatus() any {
 		PendingMode:           pendingMode,
 		PendingModeApplyAt:    pendingModeApplyAt,
 		SoC:                   s.store.GetFloat("scheduler.current_soc", 0),
-		MinSoC:                s.store.GetFloat("scheduler.min_soc", 0),
-		SkipAboveSoC:          s.store.GetFloat("scheduler.skip_above_soc", 0),
+		MinSoC:                s.store.GetFloat("scheduler.min_soc", 15),
+		SafeSoC:               s.store.GetFloat("scheduler.safe_soc", 50),
 		SocTarget:             scheduler.EffectiveTargetSoC(s.store),
+		NormalTarget:          s.store.GetFloat("scheduler.target_soc", 80),
+		PlanMode:              planMode,
+		TripReadyBy:           s.store.GetDefault("scheduler.trip_ready_by", ""),
+		TripActive:            s.store.GetDefault("scheduler.fill_raised_from", "") == "" && scheduler.EffectiveTargetSoC(s.store) > s.store.GetFloat("scheduler.target_soc", 80)+0.5,
+		FillActive:            s.store.GetDefault("scheduler.fill_raised_from", "") != "",
 		SkipReason:            skipReason,
 		SkipReasonKey:         skipReasonKey,
 		SkipReasonParams:      skipReasonParams,
-		DeadlineTime:          s.store.GetDefault("scheduler.deadline_time", "07:00"),
+		DepartureTime:         s.store.GetDefault("scheduler.departure_time", "07:00"),
 		BatteryAutonomy:       s.store.GetInt("vehicle.battery_autonomy", 0),
 		ChargingStatus:        s.store.GetFloat("vehicle.charging_status", 0),
 		PlugStatus:            s.store.GetInt("vehicle.plug_status", 0),

@@ -47,85 +47,6 @@ func TestTotalForceEnergy(t *testing.T) {
 	assert.InDelta(t, 11+5.5, got, 0.001)
 }
 
-func TestMergeForcesIntoSchedule_AppendsToMatchingSlot(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	deadline := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, now.Location())
-	if !deadline.After(now) {
-		deadline = deadline.Add(24 * time.Hour)
-	}
-
-	autoSched := &Schedule{
-		Slots: []ScheduleSlot{{
-			Date:     deadline.Format("2006-01-02"),
-			Deadline: deadline,
-			Periods: []SchedulePeriod{
-				{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30, Source: sourceAuto},
-			},
-			Cost: 3.30, Energy: 11,
-		}},
-		Cost: 3.30, Energy: 11, Deadline: deadline,
-	}
-
-	forceStart := now.Add(2 * time.Hour)
-	forceEnd := now.Add(3 * time.Hour)
-	forces := []SchedulePeriod{
-		{Start: forceStart, End: forceEnd, Power: 11000, Price: 0.50, Source: sourceUserForce},
-	}
-
-	got := mergeForcesIntoSchedule(autoSched, forces, deadline)
-	require.NotNil(t, got)
-	require.Len(t, got.Slots, 1)
-	assert.Len(t, got.Slots[0].Periods, 2)
-	assert.Equal(t, sourceAuto, got.Slots[0].Periods[0].Source)
-	assert.Equal(t, sourceUserForce, got.Slots[0].Periods[1].Source)
-	assert.InDelta(t, 22, got.Energy, 0.01)
-	assert.InDelta(t, 11*0.30+11*0.50, got.Cost, 0.01)
-}
-
-func TestMergeForcesIntoSchedule_CreatesNewSlotForFutureForce(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	deadline := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, now.Location())
-	if !deadline.After(now) {
-		deadline = deadline.Add(24 * time.Hour)
-	}
-
-	// Force lands well past today's deadline, into the next day's window.
-	forceStart := deadline.Add(2 * time.Hour)
-	forceEnd := deadline.Add(3 * time.Hour)
-	forces := []SchedulePeriod{
-		{Start: forceStart, End: forceEnd, Power: 11000, Price: 0.40, Source: sourceUserForce},
-	}
-
-	got := mergeForcesIntoSchedule(nil, forces, deadline)
-	require.NotNil(t, got)
-	require.Len(t, got.Slots, 1)
-	assert.Equal(t, deadline.Add(24*time.Hour), got.Slots[0].Deadline)
-	assert.Len(t, got.Slots[0].Periods, 1)
-}
-
-func TestMergeForcesIntoSchedule_NilWithNoForces(t *testing.T) {
-	got := mergeForcesIntoSchedule(nil, nil, time.Now())
-	assert.Nil(t, got)
-}
-
-func TestMergeForcesIntoSchedule_ForceOnlyWhenAutoNil(t *testing.T) {
-	now := time.Now().Truncate(time.Hour)
-	deadline := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, now.Location())
-	if !deadline.After(now) {
-		deadline = deadline.Add(24 * time.Hour)
-	}
-
-	forces := []SchedulePeriod{
-		{Start: now, End: now.Add(time.Hour), Power: 11000, Price: 0.30, Source: sourceUserForce},
-	}
-	got := mergeForcesIntoSchedule(nil, forces, deadline)
-	require.NotNil(t, got)
-	require.Len(t, got.Slots, 1)
-	assert.Equal(t, sourceUserForce, got.Slots[0].Periods[0].Source)
-	assert.InDelta(t, 11, got.Energy, 0.01)
-	assert.InDelta(t, 3.30, got.Cost, 0.01)
-}
-
 func TestNextDeadlineAfter(t *testing.T) {
 	loc := time.UTC
 	t1 := time.Date(2026, 5, 4, 5, 0, 0, 0, loc)
@@ -152,11 +73,10 @@ func TestRecompute_ForceSurvivesSoCSkip(t *testing.T) {
 	_ = st.Set("charger.max_power", "11000")
 	_ = st.Set("scheduler.battery_capacity", "52")
 	_ = st.Set("scheduler.target_soc", "80")
-	_ = st.Set("scheduler.skip_above_soc", "70")
 	_ = st.Set("scheduler.current_soc", "75")
-	_ = st.Set("scheduler.deadline_time", "07:00")
+	_ = st.Set("scheduler.departure_time", "07:00")
 
-	// All positive prices — auto would normally skip at SoC 75 > 70.
+	// All positive prices: auto would normally skip at SoC 75 > 70.
 	rates := []tariff.Rate{
 		{Start: now, End: now.Add(time.Hour), Price: 0.30},
 		{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: 0.40},
@@ -200,8 +120,9 @@ func TestRecompute_BlockExcludesHourFromAutoSelection(t *testing.T) {
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "11") // ~1h needed
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
+	_ = st.Set("scheduler.current_soc", "65")
+	_ = st.Set("scheduler.safe_soc", "70") // ~1h needed
+	_ = st.Set("scheduler.departure_time", now.Add(24*time.Hour).Format("15:04"))
 
 	rates := []tariff.Rate{
 		{Start: now, End: now.Add(time.Hour), Price: 0.10}, // cheapest
@@ -234,7 +155,7 @@ func TestManualSelectionEscapesLegacyCancelledDay(t *testing.T) {
 	mock := &mockCharger{connected: true, status: "Available"}
 	s, st := newTestScheduler(t, mock)
 	now := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, st.Set("scheduler.target_energy", "11"))
+	require.NoError(t, st.Set("scheduler.safe_soc", "70"))
 	s.tariff = &mockTariff{rates: []tariff.Rate{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: .3}}}
 	s.recompute()
 	require.NotNil(t, s.current)
@@ -255,7 +176,7 @@ func TestResetPausesAutoButAllowsManualWindows(t *testing.T) {
 	mock := &mockCharger{connected: true, status: "Available"}
 	s, st := newTestScheduler(t, mock)
 	now := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, st.Set("scheduler.target_energy", "11"))
+	require.NoError(t, st.Set("scheduler.safe_soc", "70"))
 	s.tariff = &mockTariff{rates: []tariff.Rate{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), Price: .3}}}
 	s.recompute()
 	require.NotNil(t, s.current)

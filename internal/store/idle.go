@@ -72,7 +72,7 @@ type TimeWindow struct {
 //
 // Idle is the meter delta over time windows where no charging session is
 // active. While a session is open, every watt drawn from the grid is
-// attributed to the car, even if the house is consuming some of it — that's
+// attributed to the car, even if the house is consuming some of it: that's
 // the user-stated convention ("if the car charges, all of the electricity
 // is assumed to be consumed by a car").
 //
@@ -87,7 +87,7 @@ func (s *Store) SnapshotDailyIdle(day time.Time) error {
 // hourly consumption rather than the live meter. Used after a consumption
 // backfill (initial deploy or recovery from downtime) to heal any
 // daily_idle row that's missing or partial because the local meter wasn't
-// reachable. Idempotent — last writer wins via UpsertDailyIdle.
+// reachable. Idempotent: last writer wins via UpsertDailyIdle.
 func (s *Store) RebuildDailyIdle(day time.Time) error {
 	return s.computeDailyIdle(day, events.ActionRebuildDailyIdle,
 		s.PstrykRowsCount, 1, s.PstrykEnergyKWh)

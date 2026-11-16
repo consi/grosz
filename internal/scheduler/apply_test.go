@@ -148,40 +148,63 @@ func TestApplyProfile_SendsAfterResetProfileState(t *testing.T) {
 	assert.Equal(t, 2, mock.profiles, "should re-send after ResetProfileState even for same schedule")
 }
 
-func TestApplyProfile_CooldownPreventsFlood(t *testing.T) {
+// Different plans are each written while within the hourly write budget.
+func TestApplyProfile_ChangedPlanIsWritten(t *testing.T) {
 	mock := &mockCharger{connected: true}
-	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.max_power", "11000")
+	s, _ := newTestScheduler(t, mock)
 	now := time.Now().Truncate(time.Hour)
 
 	s.applyProfile(makeSchedule(now))
-
-	// Different schedule but within cooldown window
 	s.applyProfile(makeDifferentSchedule(now))
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	assert.Equal(t, 1, mock.profiles, "cooldown should prevent second send")
+	assert.Equal(t, 2, mock.profiles)
 }
 
-func TestApplyProfile_SendsAfterCooldownExpires(t *testing.T) {
+// Zappi allows 24 writes/hour; we stop well below and persist the count so a
+// restart cannot reset it.
+func TestApplyProfile_WriteBudgetEnforcedAndPersisted(t *testing.T) {
 	mock := &mockCharger{connected: true}
 	s, st := newTestScheduler(t, mock)
-	_ = st.Set("charger.max_power", "11000")
+	base := time.Now().Truncate(time.Hour).Add(2 * time.Hour)
+	for i := 0; i < profileWriteBudget+3; i++ {
+		sched := makeSchedule(base)
+		sched.Slots[0].Periods[0].End = base.Add(time.Duration(10+i) * time.Minute)
+		s.applyProfile(sched)
+	}
+	mock.mu.Lock()
+	assert.Equal(t, profileWriteBudget, mock.profiles, "writes beyond budget must be deferred")
+	mock.mu.Unlock()
+
+	// A fresh scheduler on the same store (restart) still sees the budget used.
+	s2 := &Scheduler{charger: mock, store: st, events: s.events, log: s.log}
+	s2.applyProfile(makeDifferentSchedule(base))
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Equal(t, profileWriteBudget, mock.profiles, "budget must survive a restart")
+}
+
+// A rejected write ("Not enough slots") must back off instead of retrying on
+// every recompute / control tick: the retry storm kept Zappi locked out.
+func TestApplyProfile_RejectionBacksOff(t *testing.T) {
+	fc := &failingCharger{mockCharger: mockCharger{connected: true}, failSet: true}
+	s, _ := newTestScheduler(t, &fc.mockCharger)
+	s.charger = fc
 	now := time.Now().Truncate(time.Hour)
 
 	s.applyProfile(makeSchedule(now))
+	fc.failSet = false
+	for i := 0; i < 5; i++ {
+		s.applyProfile(makeSchedule(now))
+	}
+	assert.Equal(t, 0, fc.profiles, "no retries during backoff")
 
-	// Expire cooldown manually
 	s.mu.Lock()
-	s.lastProfileSent = time.Now().Add(-profileCmdCooldown - time.Second)
+	s.profileBackoffUntil = time.Time{}
 	s.mu.Unlock()
-
-	s.applyProfile(makeDifferentSchedule(now))
-
-	mock.mu.Lock()
-	defer mock.mu.Unlock()
-	assert.Equal(t, 2, mock.profiles, "should send after cooldown expires")
+	s.applyProfile(makeSchedule(now))
+	assert.Equal(t, 1, fc.profiles, "retry after backoff")
 }
 
 func TestApplyProfile_FailureDoesNotUpdateHash(t *testing.T) {
@@ -189,9 +212,8 @@ func TestApplyProfile_FailureDoesNotUpdateHash(t *testing.T) {
 		mockCharger: mockCharger{connected: true},
 		failSet:     true,
 	}
-	s, st := newTestScheduler(t, &fc.mockCharger)
+	s, _ := newTestScheduler(t, &fc.mockCharger)
 	s.charger = fc
-	_ = st.Set("charger.max_power", "11000")
 	now := time.Now().Truncate(time.Hour)
 
 	s.applyProfile(makeSchedule(now))
@@ -200,8 +222,10 @@ func TestApplyProfile_FailureDoesNotUpdateHash(t *testing.T) {
 	assert.Empty(t, s.lastProfileHash, "hash should not be set on failure")
 	s.mu.RUnlock()
 
-	// Now succeed
 	fc.failSet = false
+	s.mu.Lock()
+	s.profileBackoffUntil = time.Time{}
+	s.mu.Unlock()
 	s.applyProfile(makeSchedule(now))
 
 	s.mu.RLock()
@@ -311,8 +335,9 @@ func TestRecompute_IdenticalSchedule_NoOcppTraffic(t *testing.T) {
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "10")
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
+	_ = st.Set("scheduler.current_soc", "65")
+	_ = st.Set("scheduler.safe_soc", "70") // ~1h needed, must charge
+	_ = st.Set("scheduler.departure_time", now.Add(24*time.Hour).Format("15:04"))
 
 	rates := []tariff.Rate{
 		{Start: now, End: now.Add(time.Hour), Price: 0.30},
@@ -326,11 +351,6 @@ func TestRecompute_IdenticalSchedule_NoOcppTraffic(t *testing.T) {
 	firstProfiles := mock.profiles
 	mock.mu.Unlock()
 	assert.Equal(t, 1, firstProfiles, "first recompute should send profile")
-
-	// Expire cooldown
-	s.mu.Lock()
-	s.lastProfileSent = time.Now().Add(-profileCmdCooldown - time.Second)
-	s.mu.Unlock()
 
 	s.recompute()
 
@@ -346,8 +366,9 @@ func TestRecompute_ChangedSchedule_SendsProfile(t *testing.T) {
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "10")
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
+	_ = st.Set("scheduler.current_soc", "65")
+	_ = st.Set("scheduler.safe_soc", "70") // ~1h needed, must charge
+	_ = st.Set("scheduler.departure_time", now.Add(24*time.Hour).Format("15:04"))
 
 	// Future-only rates so neither computed slot is in progress (which would
 	// engage the preserve-active-slot path and dedup the second send).
@@ -365,11 +386,6 @@ func TestRecompute_ChangedSchedule_SendsProfile(t *testing.T) {
 		{Start: now.Add(3 * time.Hour), End: now.Add(4 * time.Hour), Price: 0.10},
 	}}
 
-	// Expire cooldown
-	s.mu.Lock()
-	s.lastProfileSent = time.Now().Add(-profileCmdCooldown - time.Second)
-	s.mu.Unlock()
-
 	s.recompute()
 
 	mock.mu.Lock()
@@ -384,8 +400,9 @@ func TestProfileCooldown_BurstProtection(t *testing.T) {
 	s, st := newTestScheduler(t, mock)
 	_ = st.Set("charger.mode", "schedule")
 	_ = st.Set("charger.max_power", "11000")
-	_ = st.Set("scheduler.target_energy", "10")
-	_ = st.Set("scheduler.deadline_time", now.Add(24*time.Hour).Format("15:04"))
+	_ = st.Set("scheduler.current_soc", "65")
+	_ = st.Set("scheduler.safe_soc", "70") // ~1h needed, must charge
+	_ = st.Set("scheduler.departure_time", now.Add(24*time.Hour).Format("15:04"))
 
 	var wg sync.WaitGroup
 	rates := []tariff.Rate{
