@@ -912,7 +912,7 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "force", cpID)
-			s.sendStartForced(cpID, "force", suspendedEVOverride)
+			_ = s.sendStartForced(cpID, "force", suspendedEVOverride) // logged and recorded inside
 		}
 	default: // "schedule"
 		s.mu.RLock()
@@ -953,7 +953,7 @@ func (s *Scheduler) controlChargingInternal(mode string, forced bool) {
 				return
 			}
 			s.recordPlugCheckSkip(skipReason, "schedule", cpID)
-			s.sendStartForced(cpID, "schedule", suspendedEVOverride)
+			_ = s.sendStartForced(cpID, "schedule", suspendedEVOverride) // logged and recorded inside
 		} else if !shouldCharge && hasTransaction {
 			s.idleTransaction(cpID, txnID, status, sched)
 		} else if shouldCharge && hasTransaction {
