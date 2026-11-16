@@ -10,15 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- mergeActiveSlotPreservingActive ---
-
-func mockNow(t *testing.T, at time.Time) {
-	t.Helper()
-	orig := timeNow
-	timeNow = func() time.Time { return at }
-	t.Cleanup(func() { timeNow = orig })
-}
-
 // --- persistence ---
 
 // saveCurrent encodes s.current to settings; loadPersistedSchedule restores

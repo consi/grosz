@@ -452,11 +452,11 @@ func stickyPrev(in PlanInput, fresh []SchedulePeriod, sig string, need, kw float
 // changes (targets, mode, overrides, settings) as opposed to SoC drift.
 func planSignature(in PlanInput, target float64, mode string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%.0f|%.0f|%.0f|%.2f|%.2f|%.0f|%d:%d|%v|%d",
+	_, _ = fmt.Fprintf(h, "%s|%.0f|%.0f|%.0f|%.2f|%.2f|%.0f|%d:%d|%v|%d",
 		mode, target, in.Floor, in.Safe, in.MaxPrice, in.CheapFillPrice, in.CheapFillSoC,
 		in.DepartureH, in.DepartureM, in.Paused, in.TripReadyBy.Unix())
 	for _, o := range append(append([]store.ScheduleOverride{}, in.Forces...), in.Blocks...) {
-		fmt.Fprintf(h, "|%s%d-%d", o.Kind, o.Start.Unix(), o.End.Unix())
+		_, _ = fmt.Fprintf(h, "|%s%d-%d", o.Kind, o.Start.Unix(), o.End.Unix())
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])
 }

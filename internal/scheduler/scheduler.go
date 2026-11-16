@@ -502,15 +502,6 @@ func (s *Scheduler) recalcTotals() {
 	s.current.Energy = math.Round(energy*100) / 100
 }
 
-// cloneSlot returns a deep copy of slot with its Periods slice copied,
-// so callers can hand the result to a different *Schedule without aliasing
-// the source slot's backing array.
-func cloneSlot(slot ScheduleSlot) ScheduleSlot {
-	cp := slot
-	cp.Periods = append([]SchedulePeriod(nil), slot.Periods...)
-	return cp
-}
-
 // detectMissedPeriods scans the previous schedule for charging periods that
 // elapsed since the last recompute and emits a `missed_period` system event
 // for any that had no overlapping charging session: i.e. the car wasn't
