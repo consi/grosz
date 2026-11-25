@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '../i18n';
+import { CameraPreview } from './CameraPreview';
 
 const SOC_MIN = 30;
 const SOC_MAX = 100;
@@ -20,6 +21,8 @@ interface Props {
   vehicleModel?: string;
   vehiclePicture?: string;
   mileage?: number;
+  // A camera stream is configured: show it live inside the card.
+  cameraEnabled?: boolean;
   onSocTargetChange: (target: number) => Promise<boolean>;
 }
 
@@ -42,7 +45,7 @@ function near(a: number, b: number): boolean {
   return Math.abs(a - b) < 0.01;
 }
 
-export function CarStatus({ soc, minSoc, safeSoc, socTarget, batteryAutonomy, chargingStatus, plugStatus, chargingRemainingTime, vehicleModel, vehiclePicture, mileage, onSocTargetChange }: Props) {
+export function CarStatus({ soc, minSoc, safeSoc, socTarget, batteryAutonomy, chargingStatus, plugStatus, chargingRemainingTime, vehicleModel, vehiclePicture, mileage, cameraEnabled, onSocTargetChange }: Props) {
   const { t } = useTranslation();
   const [imgError, setImgError] = useState(false);
   const barColor = socBarColor(soc, minSoc, safeSoc);
@@ -74,7 +77,7 @@ export function CarStatus({ soc, minSoc, safeSoc, socTarget, batteryAutonomy, ch
   })();
 
   return (
-    <section className="card car-status-card">
+    <section className={`card car-status-card ${cameraEnabled ? 'has-camera' : ''}`}>
       <div className="card-head">
         <h2>{t('car.heading')}</h2>
         {hasData && <span className="card-aside car-soc num">{soc.toFixed(0)}%</span>}
@@ -86,39 +89,48 @@ export function CarStatus({ soc, minSoc, safeSoc, socTarget, batteryAutonomy, ch
         {safeSoc > 0 && <div className="soc-threshold soc-skip" style={{ left: `${safeSoc}%` }} title={t('car.safeSoc', { value: safeSoc })} />}
       </div>
 
-      {hasData ? (
-        <div className={`car-status-layout ${showImage ? '' : 'no-image'}`}>
-          {showImage && (
-            <div className="car-image-section">
-              <img
-                className="car-image"
-                src={vehiclePicture}
-                alt={vehicleModel || 'Vehicle'}
-                onError={() => setImgError(true)}
-              />
-              {vehicleModel && <span className="car-model-name">{vehicleModel}</span>}
+      <div className="car-body">
+        {cameraEnabled && <CameraPreview />}
+        <div className="car-info">
+          {hasData ? (
+            <div className={`car-status-layout ${showImage ? '' : 'no-image'}`}>
+              {showImage && (
+                <div className="car-image-section">
+                  <img
+                    className="car-image"
+                    src={vehiclePicture}
+                    alt={vehicleModel || 'Vehicle'}
+                    onError={() => setImgError(true)}
+                  />
+                  {vehicleModel && <span className="car-model-name">{vehicleModel}</span>}
+                </div>
+              )}
+              <dl className="stat-list car-details">
+                {/* The model is named under the picture; this row stands in
+                    wherever the picture is not shown. */}
+                {vehicleModel && (
+                  <div className={showImage ? 'car-vehicle-row with-image' : 'car-vehicle-row'}>
+                    <dt>{t('car.vehicle')}</dt><dd>{vehicleModel}</dd>
+                  </div>
+                )}
+                <div><dt>{t('car.range')}</dt><dd className="num">{batteryAutonomy} km</dd></div>
+                {mileage != null && mileage > 0 && (
+                  <div><dt>{t('car.mileage')}</dt><dd className="num">{Math.round(mileage).toLocaleString()} km</dd></div>
+                )}
+                <div><dt>{t('car.charging')}</dt><dd style={{ color: charging.color }}>{charging.label}</dd></div>
+                <div><dt>{t('car.plug')}</dt><dd style={{ color: plug.color }}>{plug.label}</dd></div>
+                {near(chargingStatus, 1.0) && remaining && (
+                  <div><dt>{t('car.remaining')}</dt><dd className="num">{remaining}</dd></div>
+                )}
+              </dl>
             </div>
+          ) : (
+            <p className="muted empty">{t('car.noData')}</p>
           )}
-          <dl className="stat-list car-details">
-            {!showImage && vehicleModel && (
-              <div><dt>{t('car.vehicle')}</dt><dd>{vehicleModel}</dd></div>
-            )}
-            <div><dt>{t('car.range')}</dt><dd className="num">{batteryAutonomy} km</dd></div>
-            {mileage != null && mileage > 0 && (
-              <div><dt>{t('car.mileage')}</dt><dd className="num">{Math.round(mileage).toLocaleString()} km</dd></div>
-            )}
-            <div><dt>{t('car.charging')}</dt><dd style={{ color: charging.color }}>{charging.label}</dd></div>
-            <div><dt>{t('car.plug')}</dt><dd style={{ color: plug.color }}>{plug.label}</dd></div>
-            {near(chargingStatus, 1.0) && remaining && (
-              <div><dt>{t('car.remaining')}</dt><dd className="num">{remaining}</dd></div>
-            )}
-          </dl>
-        </div>
-      ) : (
-        <p className="muted empty">{t('car.noData')}</p>
-      )}
 
-      {hasData && <SocLimitControl socTarget={socTarget} onChange={onSocTargetChange} />}
+          {hasData && <SocLimitControl socTarget={socTarget} onChange={onSocTargetChange} />}
+        </div>
+      </div>
     </section>
   );
 }

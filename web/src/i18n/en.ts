@@ -133,6 +133,13 @@ const en = {
   'car.chargeLimitSaving': 'Saving…',
   'car.chargeLimitSaved': 'Saved',
   'car.chargeLimitError': 'Failed to update charge limit',
+  'camera.label': 'Live camera view of the car',
+  'camera.live': 'Live',
+  'camera.connecting': 'Connecting to camera…',
+  'camera.unavailable': 'Camera unavailable',
+  'camera.unsupported': 'This browser cannot play the camera stream',
+  'camera.retry': 'Retry',
+  'camera.fullscreen': 'Full screen',
 
   // Schedule
   'schedule.heading': 'Charging Schedule',
@@ -359,6 +366,13 @@ const en = {
   'settings.cheapFillPriceHelp': 'Hours at or below this price charge above the normal target. 0 = off.',
   'settings.cheapFillSoc': 'Cheap fill limit (%)',
   'settings.cheapFillSocHelp': 'Highest charge level for cheap and negative-price hours.',
+  'settings.camera': 'Camera',
+  'settings.cameraUrl': 'RTSP stream URL',
+  'settings.cameraUrlHelp': 'Live preview on the dashboard. Leave empty to turn the camera off.',
+  'settings.cameraUsername': 'RTSP username',
+  'settings.cameraPassword': 'RTSP password',
+  'settings.cameraPasswordHelp': 'Stays on the server. Clear the username to remove it.',
+  'settings.cameraUrlInvalid': 'Camera URL must start with rtsp:// or rtsps://',
   'settings.logging': 'Logging',
   'settings.logLevel': 'Level',
 

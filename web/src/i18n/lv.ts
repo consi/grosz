@@ -135,6 +135,13 @@ const lv: Translations = {
   'car.chargeLimitSaving': 'Saglabā…',
   'car.chargeLimitSaved': 'Saglabāts',
   'car.chargeLimitError': 'Neizdevās atjaunināt uzlādes ierobežojumu',
+  'camera.label': 'Auto tiešraides skats no kameras',
+  'camera.live': 'Tiešraide',
+  'camera.connecting': 'Savienojas ar kameru…',
+  'camera.unavailable': 'Kamera nav pieejama',
+  'camera.unsupported': 'Šī pārlūkprogramma nevar atskaņot kameras straumi',
+  'camera.retry': 'Mēģināt vēlreiz',
+  'camera.fullscreen': 'Pilnekrāns',
 
   // Schedule
   'schedule.heading': 'L\u0101d\u0113\u0161anas grafiks',
@@ -361,6 +368,13 @@ const lv: Translations = {
   'settings.cheapFillPriceHelp': 'Stundās ar šo vai zemāku cenu auto lādējas virs parastā mērķa. 0 = izslēgts.',
   'settings.cheapFillSoc': 'Lētās uzlādes ierobežojums (%)',
   'settings.cheapFillSocHelp': 'Augstākais uzlādes līmenis lētās stundās un stundās ar negatīvu cenu.',
+  'settings.camera': 'Kamera',
+  'settings.cameraUrl': 'RTSP straumes adrese',
+  'settings.cameraUrlHelp': 'Tiešraides priekšskatījums pārskatā. Atstājiet tukšu, lai kameru izslēgtu.',
+  'settings.cameraUsername': 'RTSP lietotājvārds',
+  'settings.cameraPassword': 'RTSP parole',
+  'settings.cameraPasswordHelp': 'Paliek serverī. Lai to noņemtu, izdzēsiet lietotājvārdu.',
+  'settings.cameraUrlInvalid': 'Kameras adresei jāsākas ar rtsp:// vai rtsps://',
   'settings.logging': '\u017burn\u0101l\u0113\u0161ana',
   'settings.logLevel': 'L\u012bmenis',
 

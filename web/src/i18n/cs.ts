@@ -135,6 +135,13 @@ const cs: Translations = {
   'car.chargeLimitSaving': 'Ukládání…',
   'car.chargeLimitSaved': 'Uloženo',
   'car.chargeLimitError': 'Limit nabíjení se nepodařilo aktualizovat',
+  'camera.label': 'Živý pohled kamery na auto',
+  'camera.live': 'Živě',
+  'camera.connecting': 'Připojování ke kameře…',
+  'camera.unavailable': 'Kamera není dostupná',
+  'camera.unsupported': 'Tento prohlížeč neumí přehrát obraz z kamery',
+  'camera.retry': 'Zkusit znovu',
+  'camera.fullscreen': 'Celá obrazovka',
 
   // Schedule
   'schedule.heading': 'Pl\u00e1n nab\u00edjen\u00ed',
@@ -361,6 +368,13 @@ const cs: Translations = {
   'settings.cheapFillPriceHelp': 'V hodinách s touto nebo nižší cenou se nabíjí nad běžný cíl. 0 = vypnuto.',
   'settings.cheapFillSoc': 'Limit levného dobití (%)',
   'settings.cheapFillSocHelp': 'Nejvyšší úroveň nabití v levných hodinách a hodinách se zápornou cenou.',
+  'settings.camera': 'Kamera',
+  'settings.cameraUrl': 'Adresa RTSP streamu',
+  'settings.cameraUrlHelp': 'Živý náhled v přehledu. Prázdné pole kameru vypne.',
+  'settings.cameraUsername': 'Uživatelské jméno RTSP',
+  'settings.cameraPassword': 'Heslo RTSP',
+  'settings.cameraPasswordHelp': 'Zůstává na serveru. Odstraníte ho vymazáním uživatelského jména.',
+  'settings.cameraUrlInvalid': 'Adresa kamery musí začínat rtsp:// nebo rtsps://',
   'settings.logging': 'Protokolov\u00e1n\u00ed',
   'settings.logLevel': '\u00darove\u0148',
 

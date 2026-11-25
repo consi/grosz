@@ -17,6 +17,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/remotetrigger"
 
 	"github.com/consi/grosz/internal/abrp"
+	"github.com/consi/grosz/internal/camera"
 	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/meter"
 	"github.com/consi/grosz/internal/ocpp"
@@ -75,6 +76,9 @@ var defaultSettings = map[string]string{
 	"charger.mode":                    "schedule",
 	"meter.url":                       "",
 	"meter.interval":                  "5",
+	camera.KeyURL:                     "",
+	camera.KeyUsername:                "",
+	camera.KeyPassword:                "",
 	"web.port":                        "3000",
 	"log.level":                       "info",
 	"log.format":                      "text",
@@ -187,8 +191,11 @@ func main() {
 		log.Info("scheduler started")
 	}
 
+	// Camera preview: pulls the RTSP stream only while a dashboard is watching.
+	cam := camera.New(st, st, log)
+
 	// Create web server
-	webSrv := web.New(srv, st, tp, sched, meterPoller, renaultPoller, bootID, version, commit, log)
+	webSrv := web.New(srv, st, tp, sched, meterPoller, renaultPoller, cam, bootID, version, commit, log)
 	webPort := st.GetInt("web.port", 3000)
 
 	// Wire up live SSE broadcasts
@@ -307,6 +314,7 @@ func main() {
 	)
 	shutdownCancel()
 	webSrv.Stop()
+	cam.Stop()
 	renaultPoller.Stop()
 	meterPoller.Stop()
 	statusChecker.Stop()

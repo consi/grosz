@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/consi/grosz/internal/camera"
 	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/meter"
 	"github.com/consi/grosz/internal/ocpp"
@@ -36,6 +37,7 @@ type Server struct {
 	scheduler *scheduler.Scheduler
 	meter     *meter.Poller
 	renault   *vehicle.Renault
+	camera    *camera.Restreamer
 	sse       *SSEBroker
 	log       *slog.Logger
 
@@ -47,7 +49,7 @@ type Server struct {
 }
 
 // New creates a new web server.
-func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, rp *vehicle.Renault, bootID, version, commit string, log *slog.Logger) *Server {
+func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *scheduler.Scheduler, mp *meter.Poller, rp *vehicle.Renault, cam *camera.Restreamer, bootID, version, commit string, log *slog.Logger) *Server {
 	sseBroker := NewSSEBroker(log)
 	sseBroker.SetBootID(bootID)
 
@@ -60,6 +62,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 		scheduler:  sched,
 		meter:      mp,
 		renault:    rp,
+		camera:     cam,
 		sse:        sseBroker,
 		log:        log.With("component", "web"),
 		bootID:     bootID,
@@ -138,6 +141,7 @@ func New(ocppSrv *ocpp.Server, st *store.Store, tp tariff.Provider, sched *sched
 	mux.HandleFunc("GET /api/settings", s.requireAuth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.requireAuth(s.handlePutSettings))
 	mux.HandleFunc("GET /api/vehicle/image", s.handleVehicleImage)
+	mux.HandleFunc("GET /api/camera/hls/{file}", s.requireAuth(s.camera.ServeHLS))
 	mux.HandleFunc("GET /api/renault/tfa/status", s.requireAuth(s.handleRenaultTFAStatus))
 	mux.HandleFunc("POST /api/renault/tfa/start", s.requireAuth(s.handleRenaultTFAStart))
 	mux.HandleFunc("POST /api/renault/tfa/verify", s.requireAuth(s.handleRenaultTFAVerify))
@@ -254,6 +258,7 @@ func (s *Server) buildStatus() any {
 		VehiclePicture        string                   `json:"vehiclePicture,omitempty"`
 		Mileage               float64                  `json:"mileage"`
 		RenaultTfaRequired    bool                     `json:"renaultTfaRequired"`
+		CameraEnabled         bool                     `json:"cameraEnabled"`
 	}
 
 	result := make([]cpInfo, 0)
@@ -355,6 +360,7 @@ func (s *Server) buildStatus() any {
 		VehiclePicture:        vehiclePicture,
 		Mileage:               mileage,
 		RenaultTfaRequired:    s.store.GetBool("vehicle.renault_tfa_required", false),
+		CameraEnabled:         s.camera.Enabled(),
 	}
 }
 

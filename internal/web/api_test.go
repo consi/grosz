@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/consi/grosz/internal/camera"
 	"github.com/consi/grosz/internal/ocpp"
 	"github.com/consi/grosz/internal/store"
 	"github.com/consi/grosz/internal/tariff"
@@ -66,7 +67,7 @@ func newAPITestServer(t *testing.T) (*Server, *testutil.TestChargePoint, *ocpp.S
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 
-	web := New(srv, st, noopTariff{}, nil, nil, nil, "test-boot", "test", "test", log)
+	web := New(srv, st, noopTariff{}, nil, nil, nil, camera.New(st, st, log), "test-boot", "test", "test", log)
 	return web, tcp, srv
 }
 

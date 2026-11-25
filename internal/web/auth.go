@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/consi/grosz/internal/camera"
 )
 
 const bcryptCost = 12
@@ -33,6 +35,7 @@ var sensitiveKeys = map[string]bool{
 	"vehicle.renault_session": true,
 	"vehicle.renault_gmid":    true,
 	"vehicle.renault_ucid":    true,
+	camera.KeyPassword:        true,
 }
 
 // migratePasswordHash ensures auth.password is stored as a bcrypt hash.

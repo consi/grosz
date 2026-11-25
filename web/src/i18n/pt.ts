@@ -135,6 +135,13 @@ const pt: Translations = {
   'car.chargeLimitSaving': 'A guardar…',
   'car.chargeLimitSaved': 'Guardado',
   'car.chargeLimitError': 'Falha ao atualizar o limite de carga',
+  'camera.label': 'Vista em direto do carro pela câmara',
+  'camera.live': 'Em direto',
+  'camera.connecting': 'A ligar à câmara…',
+  'camera.unavailable': 'Câmara indisponível',
+  'camera.unsupported': 'Este navegador não consegue reproduzir a transmissão da câmara',
+  'camera.retry': 'Tentar novamente',
+  'camera.fullscreen': 'Ecrã inteiro',
 
   // Schedule
   'schedule.heading': 'Hor\u00e1rio de carregamento',
@@ -361,6 +368,13 @@ const pt: Translations = {
   'settings.cheapFillPriceHelp': 'Nas horas com este preço ou inferior, carrega acima do objetivo normal. 0 = desligado.',
   'settings.cheapFillSoc': 'Limite de carga barata (%)',
   'settings.cheapFillSocHelp': 'Nível máximo de carga em horas baratas e de preço negativo.',
+  'settings.camera': 'Câmara',
+  'settings.cameraUrl': 'URL da transmissão RTSP',
+  'settings.cameraUrlHelp': 'Pré-visualização em direto no painel. Deixe vazio para desligar a câmara.',
+  'settings.cameraUsername': 'Utilizador RTSP',
+  'settings.cameraPassword': 'Palavra-passe RTSP',
+  'settings.cameraPasswordHelp': 'Fica no servidor. Limpe o utilizador para a remover.',
+  'settings.cameraUrlInvalid': 'O URL da câmara tem de começar por rtsp:// ou rtsps://',
   'settings.logging': 'Registo',
   'settings.logLevel': 'N\u00edvel',
 

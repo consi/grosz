@@ -135,6 +135,13 @@ const de: Translations = {
   'car.chargeLimitSaving': 'Speichern…',
   'car.chargeLimitSaved': 'Gespeichert',
   'car.chargeLimitError': 'Ladelimit konnte nicht aktualisiert werden',
+  'camera.label': 'Live-Kamerabild des Autos',
+  'camera.live': 'Live',
+  'camera.connecting': 'Verbindung zur Kamera…',
+  'camera.unavailable': 'Kamera nicht verfügbar',
+  'camera.unsupported': 'Dieser Browser kann den Kamerastream nicht abspielen',
+  'camera.retry': 'Erneut versuchen',
+  'camera.fullscreen': 'Vollbild',
 
   // Schedule
   'schedule.heading': 'Ladeplan',
@@ -361,6 +368,13 @@ const de: Translations = {
   'settings.cheapFillPriceHelp': 'In Stunden zu diesem oder einem niedrigeren Preis wird über das normale Ziel hinaus geladen. 0 = aus.',
   'settings.cheapFillSoc': 'Limit für günstiges Nachladen (%)',
   'settings.cheapFillSocHelp': 'Höchster Ladestand in günstigen Stunden und Stunden mit negativem Preis.',
+  'settings.camera': 'Kamera',
+  'settings.cameraUrl': 'RTSP-Stream-URL',
+  'settings.cameraUrlHelp': 'Live-Vorschau in der Übersicht. Leer lassen, um die Kamera auszuschalten.',
+  'settings.cameraUsername': 'RTSP-Benutzername',
+  'settings.cameraPassword': 'RTSP-Passwort',
+  'settings.cameraPasswordHelp': 'Bleibt auf dem Server. Zum Entfernen den Benutzernamen leeren.',
+  'settings.cameraUrlInvalid': 'Die Kamera-URL muss mit rtsp:// oder rtsps:// beginnen',
   'settings.logging': 'Protokollierung',
   'settings.logLevel': 'Stufe',
 

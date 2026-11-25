@@ -547,6 +547,29 @@ input:disabled, select:disabled { opacity: 0.6; }
   .dash-chart { align-self: start; }
 }
 
+/* With a camera the car card carries a live picture and needs the room: it
+   takes a full row on tablets and two of the three columns on desktop, with
+   the charger and grid cards stacked beside it. Phones keep their order. */
+@media (min-width: 700px) {
+  .dashboard.has-camera {
+    grid-template-areas:
+      "mode mode"
+      "charger grid"
+      "car car"
+      "chart chart"
+      "schedule schedule";
+  }
+  .dashboard.has-camera .dash-grid { align-self: stretch; }
+}
+@media (min-width: 1200px) {
+  .dashboard.has-camera {
+    grid-template-areas:
+      "charger car car"
+      "grid car car"
+      "chart chart schedule";
+  }
+}
+
 /* ==========================================================================
    Charger card
    ========================================================================== */
@@ -620,6 +643,86 @@ input:disabled, select:disabled { opacity: 0.6; }
 .car-model-name { font-size: var(--fs-2xs); color: var(--text-3); text-align: center; text-transform: uppercase; letter-spacing: 0.04em; }
 .car-details { grid-template-columns: minmax(0, 1fr); }
 .car-details > div:last-child { border-bottom: 0; }
+
+/* The model name has its own row only where the picture is not shown. */
+.car-vehicle-row.with-image { display: none; }
+
+/* Card body: optional camera preview + vehicle info */
+.car-body, .car-info { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+
+/* Camera layout. Narrow card (phones): picture on top, the stats below it in
+   two columns, and the static car render gives way to the live picture.
+   Wide card: picture on the left, the usual info column on the right. */
+.car-status-card.has-camera { container: car / inline-size; }
+.has-camera .car-body { gap: var(--space-3); }
+.has-camera .car-image-section { display: none; }
+.has-camera .car-vehicle-row.with-image { display: flex; }
+.has-camera .car-status-layout { grid-template-columns: minmax(0, 1fr); }
+.has-camera .car-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.has-camera .car-details > div:last-child { border-bottom: 1px solid var(--border); }
+.has-camera .car-status-layout + .soc-limit-control { border-top: 0; margin-top: 0; }
+@container car (min-width: 600px) {
+  .has-camera .car-body { flex-direction: row; gap: var(--space-4); }
+  .has-camera .camera-preview { flex: 2 1 0; align-self: flex-start; }
+  .has-camera .car-info { flex: 1 1 0; min-width: 220px; }
+  .has-camera .car-image-section { display: flex; }
+  .has-camera .car-vehicle-row.with-image { display: none; }
+  .has-camera .car-status-layout { gap: var(--space-2); }
+  .has-camera .car-details { grid-template-columns: minmax(0, 1fr); }
+  .has-camera .car-details > div:last-child { border-bottom: 0; }
+  .has-camera .car-status-layout + .soc-limit-control { border-top: 1px solid var(--border); margin-top: auto; }
+}
+
+/* Live camera preview. Always dark, in both themes, like any video surface. */
+.camera-preview {
+  position: relative;
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  color: #f2f3f5;
+  background: #0b0c0e;
+  border-radius: var(--radius-md);
+}
+.camera-preview video { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.camera-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-2);
+  padding: var(--space-3);
+  font-size: var(--fs-sm);
+  text-align: center;
+  color: #c9ccd3;
+}
+.camera-spinner {
+  width: 22px; height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: camera-spin 0.9s linear infinite;
+}
+@keyframes camera-spin { to { transform: rotate(360deg); } }
+.camera-live {
+  position: absolute; top: 8px; left: 8px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px;
+  font-size: var(--fs-2xs); font-weight: 650; line-height: 1.2; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-pill);
+  pointer-events: none;
+}
+.camera-live::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #ff4d43; }
+.camera-fullscreen {
+  position: absolute; right: 8px; bottom: 8px;
+  display: grid; place-items: center;
+  width: 36px; height: 36px;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.55);
+  border: 0;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.camera-fullscreen:hover { background: rgba(0, 0, 0, 0.75); }
+.camera-fullscreen svg { width: 18px; height: 18px; }
 
 /* Charge-limit stepper pinned to the bottom of the card */
 .soc-limit-control {
@@ -1167,6 +1270,7 @@ input:disabled, select:disabled { opacity: 0.6; }
 .source-badge.src-web       { --badge: #5b57d6; }
 .source-badge.src-auth      { --badge: #3a8fae; }
 .source-badge.src-costs     { --badge: var(--danger); }
+.source-badge.src-camera    { --badge: #b0478f; }
 @media (prefers-color-scheme: dark) {
   .source-badge.src-zappi  { --badge: #64d2ff; }
   .source-badge.src-app    { --badge: #ffd60a; }
@@ -1175,6 +1279,7 @@ input:disabled, select:disabled { opacity: 0.6; }
   .source-badge.src-pstryk { --badge: #63e6e2; }
   .source-badge.src-web    { --badge: #8e8bff; }
   .source-badge.src-auth   { --badge: #6ac4dc; }
+  .source-badge.src-camera { --badge: #e48ac6; }
 }
 
 /* ==========================================================================
@@ -1316,6 +1421,7 @@ input[type="date"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
   .btn-sm { min-height: 40px; padding: 0 12px; }
   .btn-delete { width: 40px; height: 40px; }
   .chart-icon-btn { width: 40px; height: 40px; }
+  .camera-fullscreen { width: 40px; height: 40px; }
   .schedule-action, .schedule-more summary { width: 40px; height: 40px; }
   .schedule-more > button { top: 44px; }
   .schedule-cancel-all { min-height: 40px; }
@@ -1546,7 +1652,7 @@ button.con-row:hover { background: color-mix(in srgb, var(--text) 5%, transparen
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
-  .con-spinner { animation-duration: 3s; }
+  .con-spinner, .camera-spinner { animation-duration: 3s; }
   .tone-charging .status-dot, .pull-spinner.spinning { animation: none; }
   .mode-btn.pending.off,
   .mode-btn.pending.schedule,

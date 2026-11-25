@@ -95,6 +95,8 @@ export interface StatusResponse {
   vehiclePicture?: string;
   mileage?: number;
   renaultTfaRequired?: boolean;
+  // An RTSP camera is configured; the stream is at /api/camera/hls/index.m3u8.
+  cameraEnabled?: boolean;
 }
 
 export interface ProfileStatus {

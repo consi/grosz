@@ -16,6 +16,7 @@ interface SettingField {
   type: 'text' | 'number' | 'toggle' | 'select' | 'password' | 'time';
   options?: string[];
   helpKey?: TranslationKey;
+  placeholder?: string;
   min?: number;
   max?: number;
   step?: number;
@@ -100,6 +101,14 @@ const groups: SettingGroup[] = [
     ],
   },
   {
+    titleKey: 'settings.camera',
+    keys: [
+      { key: 'camera.rtsp_url', labelKey: 'settings.cameraUrl', helpKey: 'settings.cameraUrlHelp', type: 'text', placeholder: 'rtsp://192.168.1.50:554/stream1' },
+      { key: 'camera.rtsp_username', labelKey: 'settings.cameraUsername', type: 'text' },
+      { key: 'camera.rtsp_password', labelKey: 'settings.cameraPassword', helpKey: 'settings.cameraPasswordHelp', type: 'password' },
+    ],
+  },
+  {
     titleKey: 'settings.planning',
     keys: [
       { key: 'scheduler.enabled', labelKey: 'settings.enabled', type: 'toggle' },
@@ -131,10 +140,12 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
 
+  const loadSettings = () => fetch('/api/settings')
+    .then((r) => r.json())
+    .then(setSettings);
+
   useEffect(() => {
-    fetch('/api/settings')
-      .then((r) => r.json())
-      .then(setSettings);
+    void loadSettings();
   }, [refreshKey]);
 
   const handleChange = (key: string, value: string) => {
@@ -157,8 +168,14 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
         setSettings((s) => ({ ...s, ...dirty }));
         setDirty({});
         setMsg(t('settings.saved'));
+        // The server may normalise what it stores (for example it moves
+        // credentials out of the camera URL), so show its version.
+        void loadSettings().catch(() => {});
       } else {
-        setMsg(t('settings.saveFailed'));
+        // Validation errors name a translation key for their message.
+        const body = await resp.json().catch(() => null) as { errorKey?: string } | null;
+        const errorKey = body?.errorKey as TranslationKey | undefined;
+        setMsg(errorKey && t(errorKey) !== errorKey ? t(errorKey) : t('settings.saveFailed'));
       }
     } finally {
       setSaving(false);
@@ -190,7 +207,7 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
               </select>
             </label>
           )}
-          {g.keys.map(({ key, labelKey, type, options, helpKey, min, max, step }) => (
+          {g.keys.map(({ key, labelKey, type, options, helpKey, placeholder, min, max, step }) => (
             <label key={key} className="setting-row">
               <span>{t(labelKey)}{helpKey && <small className="setting-help">{t(helpKey)}</small>}</span>
               {type === 'toggle' ? (
@@ -213,7 +230,9 @@ export function Settings({ refreshKey, locale, onLocaleChange, renaultTfaAutoSta
                   value={getValue(key)}
                   onChange={(e) => handleChange(key, e.target.value)}
                   autoComplete={type === 'password' ? 'off' : undefined}
-                  placeholder={type === 'password' ? t('settings.unchanged') : undefined}
+                  placeholder={type === 'password' ? t('settings.unchanged') : placeholder}
+                  autoCapitalize={placeholder ? 'none' : undefined}
+                  spellCheck={placeholder ? false : undefined}
                 />
               )}
               {key === 'display.timezone' && (

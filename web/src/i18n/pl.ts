@@ -135,6 +135,13 @@ const pl: Translations = {
   'car.chargeLimitSaving': 'Zapisywanie…',
   'car.chargeLimitSaved': 'Zapisano',
   'car.chargeLimitError': 'Nie udało się zaktualizować limitu',
+  'camera.label': 'Podgląd samochodu na żywo z kamery',
+  'camera.live': 'Na żywo',
+  'camera.connecting': 'Łączenie z kamerą…',
+  'camera.unavailable': 'Kamera niedostępna',
+  'camera.unsupported': 'Ta przeglądarka nie odtworzy obrazu z kamery',
+  'camera.retry': 'Ponów',
+  'camera.fullscreen': 'Pełny ekran',
 
   // Schedule
   'schedule.heading': 'Harmonogram \u0142adowania',
@@ -361,6 +368,13 @@ const pl: Translations = {
   'settings.cheapFillPriceHelp': 'W godzinach o tej cenie lub niższej auto ładuje się powyżej zwykłego celu. 0 = wyłączone.',
   'settings.cheapFillSoc': 'Limit taniego doładowania (%)',
   'settings.cheapFillSocHelp': 'Najwyższy poziom naładowania w godzinach tanich i z ujemną ceną.',
+  'settings.camera': 'Kamera',
+  'settings.cameraUrl': 'Adres strumienia RTSP',
+  'settings.cameraUrlHelp': 'Podgląd na żywo na pulpicie. Puste pole wyłącza kamerę.',
+  'settings.cameraUsername': 'Użytkownik RTSP',
+  'settings.cameraPassword': 'Hasło RTSP',
+  'settings.cameraPasswordHelp': 'Pozostaje na serwerze. Aby je usunąć, wyczyść nazwę użytkownika.',
+  'settings.cameraUrlInvalid': 'Adres kamery musi zaczynać się od rtsp:// lub rtsps://',
   'settings.logging': 'Logowanie',
   'settings.logLevel': 'Poziom',
 

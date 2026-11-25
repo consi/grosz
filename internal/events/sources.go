@@ -16,4 +16,5 @@ const (
 	SourceStore   Source = "store"
 	SourceWeb     Source = "web"
 	SourceApp     Source = "app"
+	SourceCamera  Source = "camera"
 )

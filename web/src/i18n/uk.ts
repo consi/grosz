@@ -135,6 +135,13 @@ const uk: Translations = {
   'car.chargeLimitSaving': '\u0417\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043d\u044f\u2026',
   'car.chargeLimitSaved': '\u0417\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e',
   'car.chargeLimitError': '\u041d\u0435 \u0432\u0434\u0430\u043b\u043e\u0441\u044f \u043e\u043d\u043e\u0432\u0438\u0442\u0438 \u043b\u0456\u043c\u0456\u0442',
+  'camera.label': 'Пряме зображення авто з камери',
+  'camera.live': 'Наживо',
+  'camera.connecting': 'Підключення до камери…',
+  'camera.unavailable': 'Камера недоступна',
+  'camera.unsupported': 'Цей браузер не може відтворити потік з камери',
+  'camera.retry': 'Повторити',
+  'camera.fullscreen': 'На весь екран',
 
   // Schedule
   'schedule.heading': '\u0420\u043e\u0437\u043a\u043b\u0430\u0434 \u0437\u0430\u0440\u044f\u0434\u043a\u0438',
@@ -361,6 +368,13 @@ const uk: Translations = {
   'settings.cheapFillPriceHelp': 'У години з такою або нижчою ціною авто заряджається понад звичайну ціль. 0 = вимкнено.',
   'settings.cheapFillSoc': 'Ліміт дешевого дозаряджання (%)',
   'settings.cheapFillSocHelp': 'Найвищий рівень заряду в дешеві години та години з від\'ємною ціною.',
+  'settings.camera': 'Камера',
+  'settings.cameraUrl': 'Адреса потоку RTSP',
+  'settings.cameraUrlHelp': 'Пряма трансляція на панелі. Залиште порожнім, щоб вимкнути камеру.',
+  'settings.cameraUsername': 'Користувач RTSP',
+  'settings.cameraPassword': 'Пароль RTSP',
+  'settings.cameraPasswordHelp': 'Зберігається на сервері. Щоб видалити, очистьте ім’я користувача.',
+  'settings.cameraUrlInvalid': 'Адреса камери має починатися з rtsp:// або rtsps://',
   'settings.logging': '\u0416\u0443\u0440\u043d\u0430\u043b\u044e\u0432\u0430\u043d\u043d\u044f',
   'settings.logLevel': '\u0420\u0456\u0432\u0435\u043d\u044c',
 

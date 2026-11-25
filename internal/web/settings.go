@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/consi/grosz/internal/camera"
 	"github.com/consi/grosz/internal/events"
 	"github.com/consi/grosz/internal/zappi"
 )
@@ -70,6 +71,19 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Camera: validate the URL and move credentials typed into it out of the
+	// stored (and logged) value.
+	cameraChanged, err := camera.NormalizeUpdates(updates)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":    err.Error(),
+			"errorKey": "settings.cameraUrlInvalid",
+		})
+		return
+	}
+
 	if err := s.store.SetMany(updates); err != nil {
 		s.internalError(w, "failed to save settings", err)
 		return
@@ -108,6 +122,13 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	}
+
+	// Reconnect with the new source and let open dashboards show or hide the
+	// preview right away.
+	if cameraChanged {
+		s.camera.Reload()
+		s.BroadcastStatus()
 	}
 
 	writeJSON(w, map[string]any{"ok": true})

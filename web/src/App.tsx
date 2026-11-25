@@ -464,7 +464,7 @@ function AppContent({
       <main className="main" style={pulling ? { transform: `translateY(${pullDistance}px)`, transition: 'none' } : undefined}>
         {modeError && <div className="mode-error" role="alert">{modeError}</div>}
         {tab === 'dashboard' && (
-          <div className="dashboard">
+          <div className={`dashboard ${status.cameraEnabled ? 'has-camera' : ''}`}>
             <ModeControl className="mode-toggle-inline" mode={status.mode || 'schedule'} pendingMode={status.pendingMode} onModeChange={onModeChange} />
             <div className="dash-charger">
               <ChargerStatus
@@ -487,6 +487,7 @@ function AppContent({
                 vehicleModel={status.vehicleModel}
                 vehiclePicture={status.vehiclePicture}
                 mileage={status.mileage}
+                cameraEnabled={status.cameraEnabled}
                 onSocTargetChange={onSocTargetChange}
               />
             </div>

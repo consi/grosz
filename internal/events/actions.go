@@ -122,6 +122,12 @@ const (
 	ActionTripCancelled       Action = "tripCancelled"
 )
 
+// camera
+const (
+	ActionCameraStreamStarted Action = "streamStarted"
+	ActionCameraStreamStopped Action = "streamStopped"
+)
+
 // app
 const (
 	ActionAppStarted  Action = "appStarted"

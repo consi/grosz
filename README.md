@@ -38,6 +38,7 @@ Splitting the UI and the OCPP endpoint onto separate hostnames keeps the protoco
 - Target-SoC planning against the Pstryk dynamic tariff: safe-threshold waiting, negative-price ranking, cheap fill, trips
 - Forced-charge windows that bypass the optimiser when you need to leave early
 - Live SoC, range, and plug status from MyRenault / Kamereon
+- Optional live camera view of the car on the dashboard, restreamed from any RTSP camera (H264 or H265, with or without a login)
 - Zappi quirks handled for you: commercial-mode reset, single `TxDefaultProfile`, virtual ID tags, meter-interval setup
 - Per-session cost reporting and historical session history
 - Live OCPP and system event logs in the UI
@@ -252,8 +253,9 @@ Visit `https://grosz.example.com` and log in with the default `admin` / `admin`.
 1. Change the admin password (and optionally register a WebAuthn key)
 2. Enter your Pstryk.pl API token
 3. (Optional) Enter MyRenault credentials for SoC integration
-4. Set the OCPP authorisation key to match what you configured on the Zappi
-5. Set planner parameters: target SoC, departure time, safe threshold, floor, cheap-fill price, maximum charge power
+4. (Optional) Enter the RTSP stream URL of a camera that sees the car, plus its username and password if it needs them
+5. Set the OCPP authorisation key to match what you configured on the Zappi
+6. Set planner parameters: target SoC, departure time, safe threshold, floor, cheap-fill price, maximum charge power
 
 That's it. grosz pulls the next price window and schedules the cheapest hours automatically.
 
@@ -270,12 +272,14 @@ For dependency maintenance, `python3 scripts/update-dependencies.py` selects sta
 - **Persistence**: pure-Go SQLite (`modernc.org/sqlite`, no CGO) for settings, OCPP events, sessions, tariff cache.
 - **Tariff**: Pstryk.pl REST API. Prices cached locally; the planner picks the cheapest usable hours that satisfy the charge target.
 - **Vehicle SoC (optional)**: MyRenault / Kamereon API, polled to drive charge-target awareness.
+- **Camera (optional)**: grosz pulls the RTSP stream over TCP and serves it to the dashboard as low-latency HLS under `/api/camera/hls/`, behind the normal login. The video is repackaged, not transcoded (audio is dropped), so it costs little CPU but passes the camera's full bitrate on to the browser: pick the camera's sub-stream if the main one is too heavy for mobile data. The camera is only connected while a dashboard is open and is dropped a minute after the last viewer leaves, so the first picture takes about one keyframe interval of the camera to appear. Credentials stay on the server and are never returned by the API; with a camera configured the car card grows to hold the picture, and without one the dashboard is unchanged.
 
 A pre-built container image is also published at `ghcr.io/consi/grosz` if you'd rather containerise.
 
 ## Acknowledgements
 
 - [`lorenzodonini/ocpp-go`](https://github.com/lorenzodonini/ocpp-go) for the OCPP 1.6 protocol library.
+- [`bluenviron/gortsplib`](https://github.com/bluenviron/gortsplib) and [`bluenviron/gohlslib`](https://github.com/bluenviron/gohlslib) for the RTSP client and HLS muxer behind the camera view, and [`hls.js`](https://github.com/video-dev/hls.js) for playback outside Safari.
 - [`python-renault-api`](https://github.com/hacf-fr/renault-api) and the broader Renault open-source community for documenting the Gigya/Kamereon authentication flow used by `internal/vehicle/renault.go`.
 
 ## License
